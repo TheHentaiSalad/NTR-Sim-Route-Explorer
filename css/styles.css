@@ -227,7 +227,8 @@ canvas {
 #minimapBtn,
 #themeBtn,
 #optionsBtn,
-#aboutBtn {
+#aboutBtn,
+#reportBugBtn {
   background: var(--panel);
   border: 1px solid var(--panel-border);
   color: var(--text);
@@ -239,12 +240,18 @@ canvas {
   white-space: nowrap;
 }
 
+#reportBugBtn {
+  display: inline-block;
+  text-decoration: none;
+}
+
 #legendBtn:hover,
 #fitBtn:hover,
 #minimapBtn:hover,
 #themeBtn:hover,
 #optionsBtn:hover,
-#aboutBtn:hover {
+#aboutBtn:hover,
+#reportBugBtn:hover {
   background: var(--edge-dim);
 }
 
