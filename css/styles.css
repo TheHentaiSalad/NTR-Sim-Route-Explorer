@@ -228,6 +228,7 @@ canvas {
 #themeBtn,
 #optionsBtn,
 #aboutBtn,
+#changelogBtn,
 #reportBugBtn {
   background: var(--panel);
   border: 1px solid var(--panel-border);
@@ -251,6 +252,7 @@ canvas {
 #themeBtn:hover,
 #optionsBtn:hover,
 #aboutBtn:hover,
+#changelogBtn:hover,
 #reportBugBtn:hover {
   background: var(--edge-dim);
 }
@@ -706,6 +708,114 @@ canvas {
 
 #welcomeTour:hover {
   filter: brightness(1.08);
+}
+
+#changelogModal {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 10, 12, .55);
+  z-index: 1000;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+#changelogModal.showing {
+  display: flex;
+}
+
+#changelogBox {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  max-width: 560px;
+  max-height: 80vh;
+  padding: 26px 28px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+  display: flex;
+  flex-direction: column;
+}
+
+#changelogBox h2 {
+  margin: 0 0 10px;
+  font-size: 19px;
+  flex-shrink: 0;
+}
+
+#changelogBox p.muted {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+#changelogList {
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.changelogEntry + .changelogEntry {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.changelogEntry h3 {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.changelogEntry ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.changelogEntry li {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.changelogEntry li:last-child {
+  margin-bottom: 0;
+}
+
+.changelogEntry code {
+  background: var(--edge-dim);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+#changelogActions {
+  display: flex;
+  margin-top: 16px;
+  flex-shrink: 0;
+}
+
+#changelogClose {
+  flex: 1;
+  background: var(--edge-dim);
+  color: var(--text);
+  border: 1.5px solid var(--edge);
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 14.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#changelogClose:hover {
+  filter: brightness(1.15);
 }
 
 #tourOverlay {

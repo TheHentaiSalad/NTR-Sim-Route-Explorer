@@ -735,7 +735,12 @@ function drawMinimap() {
     mmCtx.fillRect(0, 0, w, h);
     const wW = worldMaxX - worldMinX, wH = worldMaxY - worldMinY;
     const s = Math.min((w - 12) / wW, (h - 12) / wH);
-    const ox = 6 - worldMinX * s, oy = 6 - worldMinY * s;
+    // The graph's aspect ratio rarely matches the minimap box's (this tree is
+    // usually much taller than wide), so whichever axis isn't the binding
+    // constraint in `s` has leftover space -- center the content in it
+    // instead of anchoring flush to the top-left with a fixed 6px margin,
+    // which left a tall/narrow tree pinned to the left edge of a wider box.
+    const ox = (w - wW * s) / 2 - worldMinX * s, oy = (h - wH * s) / 2 - worldMinY * s;
     mmCtx.fillStyle = THEME.mmDot;
     for (const n of GRAPH.nodes) {
         if (!isNodeVisible(n))
@@ -1026,7 +1031,9 @@ function minimapToWorld(clientX, clientY) {
     const mx = clientX - rect.left, my = clientY - rect.top;
     const wW = worldMaxX - worldMinX, wH = worldMaxY - worldMinY;
     const s = Math.min((mm.width - 12) / wW, (mm.height - 12) / wH);
-    const ox = 6 - worldMinX * s, oy = 6 - worldMinY * s;
+    // Must match drawMinimap()'s centering exactly, or a click lands on a
+    // different node than the one visually under the cursor.
+    const ox = (mm.width - wW * s) / 2 - worldMinX * s, oy = (mm.height - wH * s) / 2 - worldMinY * s;
     return [(mx - ox) / s, (my - oy) / s];
 }
 mm.addEventListener("mousedown", (e) => {
@@ -1457,6 +1464,9 @@ function hideWelcomeModal() {
 getEl("welcomeSkip").addEventListener("click", hideWelcomeModal);
 getEl("welcomeTour").addEventListener("click", () => { hideWelcomeModal(); startTour(); });
 getEl("aboutBtn").addEventListener("click", showWelcomeModal);
+const changelogModal = getEl("changelogModal");
+getEl("changelogBtn").addEventListener("click", () => changelogModal.classList.add("showing"));
+getEl("changelogClose").addEventListener("click", () => changelogModal.classList.remove("showing"));
 const TOUR_STEPS = [
     { sel: "#trackerModeBtn", title: "Tracker Mode", text: "The default view. It shows every unlock, but hides the nodes and decisions behind them until you’ve actually reached them. Click an unlock to reveal every node on the path that reaches it." },
     { sel: "#spoilerModeBtn", title: "All Routes/Options", text: "Shows the entire map at once, with nothing hidden. Every route, choice, and unlock is visible, including ones you haven’t reached yet. Switching here shows a one-time spoiler warning first." },
@@ -1468,6 +1478,7 @@ const TOUR_STEPS = [
     { sel: "#legendBtn", title: "Legend", text: "Shows what each color and line style on the map means." },
     { sel: "#minimapBtn", title: "Minimap", text: "A small overview map in the corner. Click it to jump around, or toggle it off." },
     { sel: "#themeBtn", title: "Theme", text: "Switch between light and dark." },
+    { sel: "#changelogBtn", title: "Changelog", text: "See what's changed in this map/tool itself recently — not the game." },
     { sel: "#hint", title: "Getting around", text: "Drag to pan, scroll to zoom, and click any node to trace the path that leads to it." },
 ];
 let tourIndex = 0;
