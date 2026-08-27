@@ -247,14 +247,10 @@ function evalExpr(rawExpr, sv) {
 function evalEdge(e, sv) {
     if (!e.raw || !e.raw.length)
         return true;
-    const byDepth = new Map();
-    for (const { expr, depth } of e.raw) {
-        if (!byDepth.has(depth))
-            byDepth.set(depth, []);
-        byDepth.get(depth).push(evalExpr(expr, sv));
-    }
-    const depthVals = [...byDepth.values()].map((vals) => triCombine(vals, true));
-    return triCombine(depthVals, false);
+    // e.raw is a list of AND-groups (alternatives), OR'd together -- see
+    // build_canvas.py's render_raw/finalize_edge for how these are produced.
+    const altVals = e.raw.map((group) => triCombine(group.map((expr) => evalExpr(expr, sv)), false));
+    return triCombine(altVals, true);
 }
 function computeBlocked(rawSave) {
     const blocked = new Set();

@@ -1,8 +1,3 @@
-interface RawCondEntry {
-  expr: string;
-  depth: number;
-}
-
 interface GraphNode {
   id: string;
   x: number;
@@ -25,7 +20,7 @@ interface GraphEdge {
   c: string | null;
   tree: boolean;
   par: boolean;
-  raw: RawCondEntry[] | null;
+  raw: string[][] | null;
 }
 
 interface GraphGroup {
@@ -355,13 +350,10 @@ function evalExpr(rawExpr: string, sv: EvalContext): TriState {
 
 function evalEdge(e: GraphEdge, sv: EvalContext): TriState {
   if (!e.raw || !e.raw.length) return true;
-  const byDepth = new Map<number, TriState[]>();
-  for (const { expr, depth } of e.raw) {
-    if (!byDepth.has(depth)) byDepth.set(depth, []);
-    byDepth.get(depth)!.push(evalExpr(expr, sv));
-  }
-  const depthVals = [...byDepth.values()].map((vals) => triCombine(vals, true));
-  return triCombine(depthVals, false);
+  // e.raw is a list of AND-groups (alternatives), OR'd together -- see
+  // build_canvas.py's render_raw/finalize_edge for how these are produced.
+  const altVals = e.raw.map((group) => triCombine(group.map((expr) => evalExpr(expr, sv)), false));
+  return triCombine(altVals, true);
 }
 
 function computeBlocked(rawSave: NormalizedSave | null): Set<string> {
