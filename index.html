@@ -104,6 +104,17 @@
       <p class="muted">Changes to this map/explorer tool itself &mdash; not to the game. See the About box for the game version this map is current with.</p>
       <div id="changelogList">
         <div class="changelogEntry">
+          <h3>2026-08-27</h3>
+          <ul>
+            <li><strong>Fixed:</strong> nested branches (e.g. Trust/Desire splits) no longer show a bloated combined condition like <code>if Trust &lt; 50 and Desire &gt; 0</code> / <code>if Trust &lt; 50 and else</code> on every edge &mdash; only the condition that actually determines each outcome shows.</li>
+            <li><strong>Fixed:</strong> the same picture reached from two mutually-exclusive branches (e.g. an NTR/NTS split both leading to the same image) now merges into one node instead of drawing duplicates.</li>
+            <li><strong>Added:</strong> dead branches &mdash; re-checking a stat that an earlier branch already locked in &mdash; are now pruned instead of drawn as if still reachable.</li>
+            <li><strong>Changed:</strong> when several mutually-exclusive branches each set a different flag and reconverge (e.g. Day 17's NTR/NTS &times; Lust/Love split), the flag note now shows exactly which condition sets each one instead of listing all of them with no attribution.</li>
+            <li><strong>Changed:</strong> <code>else</code> now shows the actual negated condition (e.g. <code>if not Mabel Trust &lt; 50</code>) instead of the bare word "else".</li>
+            <li><strong>Changed:</strong> a condition now only appears once, on the edge that actually enters its gated branch &mdash; it no longer repeats on every edge further down inside that same branch.</li>
+          </ul>
+        </div>
+        <div class="changelogEntry">
           <h3>2026-08-23</h3>
           <ul>
             <li><strong>Fixed:</strong> several missing route endings, including Day 27 Night's Erika/Nina scenes and two Phone-Upgrades-dependent endings in Mabel's Day 28 finale.</li>
