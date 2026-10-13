@@ -1375,10 +1375,14 @@ function runSearch(qRaw) {
     clearBtn.style.display = "inline-block";
     const matches = [];
     const pool = viewMode === "tracker" ? pictureNodes : GRAPH.nodes;
+    // "new" also finds the starred nodes new in this update.
+    const wantNew = q === "new";
     for (const n of pool) {
-        if (n.t.toLowerCase().includes(q))
+        if (n.t.toLowerCase().includes(q) || (wantNew && n.isNew))
             matches.push(n);
     }
+    if (wantNew)
+        matches.sort((a, b) => Number(!!b.isNew) - Number(!!a.isNew));
     filterSet = new Set(matches.map((n) => n.id));
     pathNodes = null;
     pathEdges = null;
