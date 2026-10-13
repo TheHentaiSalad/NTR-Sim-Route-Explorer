@@ -10,6 +10,9 @@ interface GraphNode {
   pic: boolean;
   src: string[];
   note: string | null;
+  isNew?: boolean;
+  /** Junction point: several paths reconverge here before the next branch. */
+  j?: boolean;
 }
 
 interface GraphEdge {
@@ -46,6 +49,8 @@ interface GraphData {
   groups: GraphGroup[];
   routes: GraphRoute[];
   flag_events: Record<string, string>;
+  route_flags?: string[];
+  flag_names?: Record<string, string>;
 }
 
 interface CharLegend {
@@ -188,6 +193,180 @@ for (const e of GRAPH.edges) {
   outEdges.get(e.f)!.push(e);
   inEdges.get(e.t)!.push(e);
 }
+/** Edges whose plain top-to-bottom curve would run behind another node (a
+ *  branch that skips straight past its sibling, e.g. "if X: scene" whose
+ *  else-edge would otherwise hide behind that scene): they still leave the
+ *  source's bottom and enter the target's top like every other edge, but
+ *  swing out sideways in the gap below the source, run down beside the
+ *  nodes in the way, and swing back in the gap above the target. */
+interface Detour { c: number; yA: number; yB: number }
+const edgeDetour = new Map<string, Detour>();
+{
+  const CELL = 200;
+  const grid = new Map<string, GraphNode[]>();
+  for (const n of GRAPH.nodes) {
+    if (n.j) continue;
+    for (let cx = Math.floor(n.x / CELL); cx <= Math.floor((n.x + n.w) / CELL); cx++)
+      for (let cy = Math.floor(n.y / CELL); cy <= Math.floor((n.y + n.h) / CELL); cy++) {
+        const k = cx + "," + cy;
+        if (!grid.has(k)) grid.set(k, []);
+        grid.get(k)!.push(n);
+      }
+  }
+  const blockersOf = (p: number[], a: GraphNode, b: GraphNode): Set<GraphNode> => {
+    const hit = new Set<GraphNode>();
+    const segs = (p.length - 2) / 6;
+    for (let i = 1; i < 48 * segs; i++) {
+      const [x, y] = pathPoint(p, i / (48 * segs));
+      for (const n of grid.get(Math.floor(x / CELL) + "," + Math.floor(y / CELL)) ?? []) {
+        if (n === a || n === b) continue;
+        if (x > n.x - 6 && x < n.x + n.w + 6 && y > n.y - 6 && y < n.y + n.h + 6) hit.add(n);
+      }
+    }
+    return hit;
+  };
+  for (const e of GRAPH.edges) {
+    if (e.par) continue;
+    const a = byId.get(e.f), b = byId.get(e.t);
+    if (!a || !b) continue;
+    const x0 = a.x + a.w / 2, y0 = a.y + a.h, x3 = b.x + b.w / 2 + edgeArrivalOffset(e, b), y3 = b.y;
+    const dy = Math.max(40, Math.abs(y3 - y0) / 2);
+    const inWay = [...blockersOf([x0, y0, x0, y0 + dy, x3, y3 - dy, x3, y3], a, b)];
+    if (!inWay.length) continue;
+    // Swing out in the gap just below the source and back in the gap just
+    // above the target, so the straight side run covers every node in the way.
+    const yA = Math.max(y0 + 12, Math.min(...inWay.map((n) => n.y)) - 10);
+    const yB = Math.min(y3 - 12, Math.max(...inWay.map((n) => n.y + n.h)) + 10);
+    // Try the right and left, further out each step; keep the first
+    // (smallest) swing that clears every node, else the one hitting fewest.
+    let best: [number, Detour] | null = null;
+    for (let step = 1; step <= 30 && !(best && best[0] === 0); step++) {
+      for (const side of [1, -1]) {
+        const xs = inWay.map((n) => (side > 0 ? n.x + n.w : n.x));
+        const c = side > 0 ? Math.max(...xs) + 30 * step : Math.min(...xs) - 30 * step;
+        const d = { c, yA, yB };
+        const hits = blockersOf(detourPoints(x0, y0, x3, y3, d), a, b).size;
+        if (!best || hits < best[0]) best = [hits, d];
+        if (hits === 0) break;
+      }
+    }
+    if (best) edgeDetour.set(e.id, best[1]);
+  }
+}
+/** A detoured edge's path as joined cubic segments (x0,y0 then three points
+ *  per segment): an S-bend out to x = `c`, straight down, an S-bend back in.
+ *  Both bends leave and arrive vertically, like a normal edge. */
+function detourPoints(x0: number, y0: number, x3: number, y3: number, d: Detour): number[] {
+  const h1 = (d.yA - y0) / 2, h2 = (y3 - d.yB) / 2, run = (d.yB - d.yA) / 3;
+  return [
+    x0, y0, x0, y0 + h1, d.c, d.yA - h1, d.c, d.yA,
+    d.c, d.yA + run, d.c, d.yB - run, d.c, d.yB,
+    d.c, d.yB + h2, x3, y3 - h2, x3, y3,
+  ];
+}
+/** Point at `t` (0..1) along a path of joined cubic segments, each segment
+ *  taking an equal share of `t`. */
+function pathPoint(p: number[], t: number): [number, number] {
+  const segs = (p.length - 2) / 6;
+  const k = Math.min(segs - 1, Math.floor(t * segs)), u = t * segs - k, o = k * 6;
+  return bezierPoint(p[o], p[o + 1], p[o + 2], p[o + 3], p[o + 4], p[o + 5], p[o + 6], p[o + 7], u);
+}
+
+/** Lines that run on top of each other for a real stretch (not just where
+ *  they leave the same node or arrive at the same one) get different colors
+ *  so each can be followed. Edges that overlap nothing keep the default. */
+const EDGE_COLORS = ["#4a9eff", "#e8743b", "#3fb36b", "#b05ce6", "#d4a017", "#1fb5ad", "#e0508f"];
+const edgeColor = new Map<string, string>();
+{
+  // NEAR: lines this close (world units, ~4 line widths at 100%) blur into
+  // one band -- e.g. several dashed lines converging on a day header at a
+  // shallow angle, a few units apart for a long stretch. Lines leaving the
+  // SAME node are exempt: that's an ordinary fork, which always starts out
+  // side by side and is told apart by its condition labels/targets.
+  const STEP = 8, NEAR = 22, CELL = 24, END_SKIP = 36, MIN_SHARED = 56;
+  // Evenly spaced sample points along every edge, in world coordinates.
+  const samples = new Map<GraphEdge, [number, number][]>();
+  const grid = new Map<string, [GraphEdge, number, number][]>();
+  for (const e of GRAPH.edges) {
+    // Only the dashed (reconvergence) lines: solid tree lines are clear
+    // enough on their own, and dashed-vs-solid already tells them apart.
+    if (e.tree) continue;
+    const a = byId.get(e.f), b = byId.get(e.t);
+    if (!a || !b) continue;
+    const p = edgeWorldPoints(e, a, b, 1);
+    const segs = (p.length - 2) / 6, fine = 64 * segs;
+    const pts: [number, number][] = [];
+    let prev = pathPoint(p, 0), acc = STEP;
+    for (let i = 1; i <= fine; i++) {
+      const q = pathPoint(p, i / fine);
+      acc += Math.hypot(q[0] - prev[0], q[1] - prev[1]);
+      prev = q;
+      if (acc >= STEP) { acc = 0; pts.push(q); }
+    }
+    // Leave out the stretch next to either end: lines leaving or entering
+    // the same node always start out bunched together, by design.
+    const [sx, sy] = pathPoint(p, 0), [ex, ey] = pathPoint(p, 1);
+    const mid = pts.filter(([x, y]) => Math.hypot(x - sx, y - sy) > END_SKIP && Math.hypot(x - ex, y - ey) > END_SKIP);
+    samples.set(e, mid);
+    for (const [x, y] of mid) {
+      const k = Math.floor(x / CELL) + "," + Math.floor(y / CELL);
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k)!.push([e, x, y]);
+    }
+  }
+  // Two edges conflict when enough of one's samples sit right on the other.
+  const conflicts = new Map<GraphEdge, Set<GraphEdge>>();
+  for (const [e, pts] of samples) {
+    const shared = new Map<GraphEdge, number>();
+    for (const [x, y] of pts) {
+      const seen = new Set<GraphEdge>();
+      const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+      for (let i = cx - 1; i <= cx + 1; i++)
+        for (let j = cy - 1; j <= cy + 1; j++)
+          for (const [o, ox, oy] of grid.get(i + "," + j) ?? []) {
+            if (o === e || o.f === e.f || seen.has(o) || Math.hypot(ox - x, oy - y) > NEAR) continue;
+            seen.add(o);
+            shared.set(o, (shared.get(o) ?? 0) + 1);
+          }
+    }
+    for (const [o, count] of shared) {
+      if (count * STEP < MIN_SHARED) continue;
+      if (!conflicts.has(e)) conflicts.set(e, new Set());
+      if (!conflicts.has(o)) conflicts.set(o, new Set());
+      conflicts.get(e)!.add(o);
+      conflicts.get(o)!.add(e);
+    }
+  }
+  // Color per bundle (connected group of overlapping lines), not just per
+  // overlapping pair: in a bundle of lines converging on one node, two lines
+  // that each only touch a third would otherwise both stay plain and still
+  // read as one. Slot 0 is the normal line color, so one line per bundle
+  // stays plain. Only very large bundles (more lines than colors) fall back
+  // to merely avoiding direct neighbours' colors.
+  const SLOTS = EDGE_COLORS.length + 1;
+  const slot = new Map<GraphEdge, number>();
+  for (const start of GRAPH.edges) {
+    if (!conflicts.has(start) || slot.has(start)) continue;
+    const bundle: GraphEdge[] = [];
+    const queue = [start], seen = new Set([start]);
+    while (queue.length) {
+      const e = queue.shift()!;
+      bundle.push(e);
+      for (const o of conflicts.get(e)!) if (!seen.has(o)) { seen.add(o); queue.push(o); }
+    }
+    const taken = new Set<number>();
+    for (const e of bundle) {
+      const near = new Set([...conflicts.get(e)!].map((o) => slot.get(o)));
+      let s = 0;
+      while (s < SLOTS && (near.has(s) || taken.has(s))) s++;
+      if (s === SLOTS) { s = 0; while (near.has(s)) s++; }
+      slot.set(e, s);
+      taken.add(s);
+      if (s > 0) edgeColor.set(e.id, EDGE_COLORS[(s - 1) % EDGE_COLORS.length]);
+    }
+  }
+}
+
 const rootId = GRAPH.nodes.find((n) => parents.get(n.id)!.length === 0)?.id ?? GRAPH.nodes[0].id;
 
 let worldMinX = Infinity, worldMinY = Infinity, worldMaxX = -Infinity, worldMaxY = -Infinity;
@@ -481,6 +660,8 @@ let selectedGroup: GraphGroup | null = null;
 
 interface LabelRect { e: GraphEdge; x0: number; y0: number; x1: number; y1: number; }
 const labelRects: LabelRect[] = [];
+/** Route-box titles placed in the last frame; edge labels steer clear of them too. */
+const groupLabelRects: { x0: number; y0: number; x1: number; y1: number }[] = [];
 
 function computeAncestorPath(id: string): { nodes: Set<string>; edges: Set<string> } {
   const seen = new Set([id]);
@@ -600,6 +781,18 @@ function draw(): void {
   const [vx0, vy0] = screenToWorld(0, 0), [vx1, vy1] = screenToWorld(vw, vh);
   const active = !!(pathNodes || filterSet);
 
+  // Every node a label could land on, including ones just off-screen (a
+  // label can sit partly outside the view while its edge or box is in it).
+  const nodeRects: Rect[] = [];
+  const reach = 400 / cam.scale;
+  for (const n of GRAPH.nodes) {
+    if (!isNodeVisible(n)) continue;
+    if (n.x + n.w < vx0 - reach || n.x > vx1 + reach || n.y + n.h < vy0 - reach || n.y > vy1 + reach) continue;
+    const [nx, ny] = worldToScreen(n.x, n.y);
+    nodeRects.push({ x0: nx, y0: ny, x1: nx + n.w * cam.scale, y1: ny + n.h * cam.scale });
+  }
+  groupLabelRects.length = 0;
+
   for (const g of viewMode === "spoiler" || showGroups ? GRAPH.groups : []) {
     if (g.x + g.w < vx0 || g.x > vx1 || g.y + g.h < vy0 || g.y > vy1) continue;
     const [sx, sy] = worldToScreen(g.x, g.y);
@@ -616,39 +809,63 @@ function draw(): void {
     if (cam.scale > 0.12) {
       ctx.globalAlpha = groupDim ? 0.35 : 1;
       ctx.fillStyle = g.color;
-      ctx.font = `600 ${Math.max(10, 12 * Math.min(cam.scale * 1.6, 1))}px sans-serif`;
+      const fontPx = Math.max(10, 12 * Math.min(cam.scale * 1.6, 1));
+      ctx.font = `600 ${fontPx}px sans-serif`;
       ctx.textBaseline = "bottom";
-      ctx.fillText(g.label.split("\n")[0], sx + 6, sy - 4);
+      const title = g.label.split("\n")[0];
+      const tw = ctx.measureText(title).width;
+      // Above the box's top-left corner by default; if that covers a node or
+      // another route's title, slide along the top edge (outside, then just
+      // inside), then along the bottom edge.
+      const spots: [number, number][] = [];
+      const xsAlong: number[] = [];
+      for (let ox = 6; ox <= Math.max(6, sw - tw - 6); ox += 18) xsAlong.push(sx + ox);
+      for (const ty of [sy - 4, sy + fontPx + 6, sy + sh + fontPx + 4, sy + sh - 6]) {
+        for (const tx of xsAlong) spots.push([tx, ty]);
+      }
+      // Beside the box (outside its left/right edge), stepping down it.
+      for (let oy = fontPx + 6; oy <= sh; oy += fontPx + 6) spots.push([sx - tw - 8, sy + oy], [sx + sw + 8, sy + oy]);
+      const fits = ([tx, ty]: [number, number]) =>
+        !hitsAny(nodeRects, tx - 2, ty - fontPx - 2, tw + 4, fontPx + 4, 2) &&
+        !hitsAny(groupLabelRects, tx - 2, ty - fontPx - 2, tw + 4, fontPx + 4, 2);
+      // Nowhere clear (only happens zoomed far out, where rows are packed
+      // tighter than the text is tall): leave the title off until zoomed in.
+      const spot = spots.find(fits);
+      if (spot) {
+        const [tx, ty] = spot;
+        groupLabelRects.push({ x0: tx - 2, y0: ty - fontPx - 2, x1: tx + tw + 2, y1: ty + 2 });
+        ctx.fillText(title, tx, ty);
+      }
       ctx.globalAlpha = 1;
     }
   }
 
   const showEdgeLabels = cam.scale > 0.22 && showConditionPills;
-  const labelsToDraw: { e: GraphEdge; mx: number; my: number }[] = [];
+  const labelsToDraw: { e: GraphEdge; pts: number[] }[] = [];
   for (const e of GRAPH.edges) {
     const a = byId.get(e.f), b = byId.get(e.t);
     if (!a || !b) continue;
     if (!isEdgeVisible(e)) continue;
-    if (Math.max(a.x, b.x) + 400 < vx0 || Math.min(a.x, b.x) - 400 > vx1) continue;
+    const dtx = edgeDetour.get(e.id)?.c ?? a.x;
+    if (Math.max(a.x, b.x, dtx) + 400 < vx0 || Math.min(a.x, b.x, dtx) - 400 > vx1) continue;
     if (Math.max(a.y + a.h, b.y + b.h) < vy0 || Math.min(a.y, b.y) > vy1) continue;
     const inSet = pathEdges && pathEdges.has(e.id);
     const dim = active && !inSet;
     const onPath = inSet && !groupOnly;
-    const col = onPath ? THEME.accent : e.c || THEME.edge;
+    const col = onPath ? THEME.accent : e.c || edgeColor.get(e.id) || THEME.edge;
     ctx.strokeStyle = col;
     ctx.globalAlpha = dim ? 0.1 : onPath ? 1 : e.tree ? 0.85 : 0.6;
     const zw = Math.min(1, cam.scale);
     ctx.lineWidth = (onPath ? 6.2 : e.tree ? 5 : 4.6) * zw;
     ctx.setLineDash(e.tree ? [] : [7, 5]);
-    const [x0, y0, x1, y1, x2, y2, x3, y3] = edgeCurvePoints(e, a, b);
+    const pts = edgeCurvePoints(e, a, b);
     ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.bezierCurveTo(x1, y1, x2, y2, x3, y3);
+    ctx.moveTo(pts[0], pts[1]);
+    for (let o = 2; o < pts.length; o += 6) ctx.bezierCurveTo(pts[o], pts[o + 1], pts[o + 2], pts[o + 3], pts[o + 4], pts[o + 5]);
     ctx.stroke();
     ctx.setLineDash([]);
     if (e.l && showEdgeLabels && !dim) {
-      const mx = 0.125 * x0 + 0.375 * x1 + 0.375 * x2 + 0.125 * x3, my = 0.125 * y0 + 0.375 * y1 + 0.375 * y2 + 0.125 * y3;
-      labelsToDraw.push({ e, mx, my });
+      labelsToDraw.push({ e, pts });
     }
     ctx.globalAlpha = 1;
   }
@@ -667,6 +884,15 @@ function draw(): void {
     const isBlocked = viewMode === "tracker" && !!saveState && blockedSet.has(n.id);
     const isObtained = viewMode === "tracker" && !!saveState && n.pic && obtainedSet.has(n.id);
     ctx.globalAlpha = dim ? Number(getComputedStyle(document.documentElement).getPropertyValue("--dim")) : isBlocked ? 0.55 : 1;
+    if (n.j) {
+      // Junction: just a dot where the incoming lines meet.
+      ctx.fillStyle = emphasize ? THEME.accent : THEME.edge;
+      ctx.beginPath();
+      ctx.arc(sx + sw / 2, sy + sh / 2, Math.max(2, (sw / 2) * 0.7), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      continue;
+    }
     const fill = isBlocked ? THEME.edgeDim : colorFor(n);
     ctx.fillStyle = fill;
     ctx.strokeStyle = emphasize ? THEME.accent2 : isBlocked ? THEME.edge : isObtained ? "#3fc98a" : THEME.nodeBorder;
@@ -674,6 +900,23 @@ function draw(): void {
     roundRect(sx, sy, Math.max(sw, 2), Math.max(sh, 2), 6 * cam.scale + 2);
     ctx.fill();
     if (!dim) ctx.stroke();
+
+    if (n.isNew && !dim) {
+      // New-in-this-update marker: a small gold star badge tucked inside the
+      // node's top-right corner. Scales with zoom the same way the node's
+      // own text does (no clamping), so it shrinks/grows with the box
+      // instead of staying a fixed screen size.
+      const starSize = 13 * cam.scale;
+      ctx.save();
+      ctx.font = `${starSize}px -apple-system,Segoe UI,sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.shadowColor = "rgba(0,0,0,0.55)";
+      ctx.shadowBlur = 2;
+      ctx.fillStyle = "#ffcc33";
+      ctx.fillText("★", sx + sw - starSize * 0.65, sy + starSize * 0.65);
+      ctx.restore();
+    }
 
     if (showText && !dim) {
       const masked = maskedNode(n);
@@ -711,14 +954,20 @@ function draw(): void {
   }
 
   labelRects.length = 0;
-  for (const { e, mx, my } of labelsToDraw) {
+  for (const { e, pts } of labelsToDraw) {
     const onPath = pathEdges && pathEdges.has(e.id) && !groupOnly;
     const fontPx = 15 * Math.min(cam.scale, 1);
     ctx.font = `600 ${fontPx}px -apple-system,Segoe UI,sans-serif`;
     const text = e.l!.length > 60 ? e.l!.slice(0, 58) + "…" : e.l!;
     const tw = ctx.measureText(text).width;
     const padX = 11, padY = 7;
-    const rx = mx - tw / 2 - padX, ry = my - fontPx / 2 - padY, rw = tw + padX * 2, rh = fontPx + padY * 2;
+    const rw = tw + padX * 2, rh = fontPx + padY * 2;
+    // Find a spot for the pill that covers no node and no label already
+    // placed: slide it along its own edge first, then nudge it sideways off
+    // the line. Failing that, settle for one that at least clears every
+    // node; failing that too, mid-edge.
+    const [mx, my] = placeLabel(pts, rw, rh, nodeRects.concat(groupLabelRects));
+    const rx = mx - rw / 2, ry = my - rh / 2;
     ctx.fillStyle = THEME.panel;
     ctx.strokeStyle = onPath ? THEME.accent : THEME.panelBorder;
     ctx.lineWidth = 1.5;
@@ -738,6 +987,36 @@ function draw(): void {
   drawMinimap();
 }
 
+/** Positions along an edge (0 = source, 1 = target) tried in turn for its
+ *  label: mid-edge first, then outward in small steps -- fine enough that a
+ *  long edge running down past a column of nodes still finds the gaps
+ *  between their rows. */
+const LABEL_SLOTS = [0.5, ...Array.from({ length: 11 }, (_, k) => [0.5 + 0.04 * (k + 1), 0.5 - 0.04 * (k + 1)]).flat()];
+
+interface Rect { x0: number; y0: number; x1: number; y1: number }
+
+function hitsAny(rects: Rect[], x0: number, y0: number, w: number, h: number, margin: number): boolean {
+  return rects.some((r) => x0 < r.x1 + margin && x0 + w > r.x0 - margin && y0 < r.y1 + margin && y0 + h > r.y0 - margin);
+}
+
+function placeLabel(pts: number[], rw: number, rh: number, nodeRects: Rect[]): [number, number] {
+  // Sideways nudges, in units of the pill's own width: on the line first,
+  // then just beside it, then further out.
+  const shifts = [0, 0.6, -0.6, 1.2, -1.2, 1.8, -1.8];
+  let nodeClear: [number, number] | null = null;
+  for (const s of shifts) {
+    for (const t of LABEL_SLOTS) {
+      const [px, py] = pathPoint(pts, t);
+      const mx = px + s * rw, my = py;
+      const x0 = mx - rw / 2, y0 = my - rh / 2;
+      if (hitsAny(nodeRects, x0, y0, rw, rh, 4)) continue;
+      if (!hitsAny(labelRects, x0, y0, rw, rh, 3)) return [mx, my];
+      nodeClear ??= [mx, my];
+    }
+  }
+  return nodeClear ?? pathPoint(pts, 0.5);
+}
+
 function edgeArrivalOffset(e: GraphEdge, b: GraphNode): number {
   // A dashed reconvergence edge, by definition, always shares its target
   // with at least one other (tree) edge -- every non-par edge arrives at
@@ -746,22 +1025,31 @@ function edgeArrivalOffset(e: GraphEdge, b: GraphNode): number {
   // land on top of each other and become indistinguishable.
   // Fan converging edges out across the node's top edge instead, so each
   // stays visually distinct.
+  if (b.j) return 0; // lines converge on the junction dot itself
   const siblings = (inEdges.get(e.t) ?? []).filter((x) => !x.par);
   if (siblings.length <= 1) return 0;
   const idx = siblings.indexOf(e);
   const frac = (idx + 1) / (siblings.length + 1) - 0.5;
   return frac * Math.min(b.w * 0.6, 120);
 }
-function edgeCurvePoints(e: GraphEdge, a: GraphNode, b: GraphNode): [number, number, number, number, number, number, number, number] {
+function edgeCurvePoints(e: GraphEdge, a: GraphNode, b: GraphNode): number[] {
+  const p = edgeWorldPoints(e, a, b, cam.scale);
+  const out: number[] = [];
+  for (let i = 0; i < p.length; i += 2) out.push(...worldToScreen(p[i], p[i + 1]));
+  return out;
+}
+/** An edge's path in world coordinates, as joined cubic segments. `scale`
+ *  only matters for the minimum bend (40 screen px) of a normal edge. */
+function edgeWorldPoints(e: GraphEdge, a: GraphNode, b: GraphNode, scale: number): number[] {
   if (e.par) {
-    const [x0, y0] = worldToScreen(a.x + a.w, a.y + a.h / 2);
-    const [x3, y3] = worldToScreen(b.x, b.y + b.h / 2);
+    const x0 = a.x + a.w, y0 = a.y + a.h / 2, x3 = b.x, y3 = b.y + b.h / 2;
     const midX = (x0 + x3) / 2;
     return [x0, y0, midX, y0, midX, y3, x3, y3];
   }
   const offset = edgeArrivalOffset(e, b);
-  const [x0, y0] = worldToScreen(a.x + a.w / 2, a.y + a.h);
-  const [x3, y3] = worldToScreen(b.x + b.w / 2 + offset, b.y);
+  const x0 = a.x + a.w / 2, y0 = a.y + a.h, x3 = b.x + b.w / 2 + offset, y3 = b.y;
+  const detour = edgeDetour.get(e.id);
+  if (detour !== undefined) return detourPoints(x0, y0, x3, y3, detour);
   // Control points pull symmetrically away from BOTH ends -- P1 sits `dy`
   // below the source, P2 sits `dy` above the target -- rather than both
   // sharing one shared midpoint. That guarantees the curve always LEAVES
@@ -773,7 +1061,7 @@ function edgeCurvePoints(e: GraphEdge, a: GraphNode, b: GraphNode): [number, num
   // cramped, ugly loop. The `/2` matches the plain midpoint exactly whenever the gap is already
   // >= 80px, so ordinary edges render pixel-identical to before; only
   // small or inverted gaps get the wider, smoother pull.
-  const dy = Math.max(40, Math.abs(y3 - y0) / 2);
+  const dy = Math.max(40 / scale, Math.abs(y3 - y0) / 2);
   return [x0, y0, x0, y0 + dy, x3, y3 - dy, x3, y3];
 }
 
@@ -864,7 +1152,7 @@ function nodeAt(clientX: number, clientY: number): GraphNode | null {
   const [wx, wy] = screenToWorld(clientX, clientY);
   for (let i = GRAPH.nodes.length - 1; i >= 0; i--) {
     const n = GRAPH.nodes[i];
-    if (!isNodeVisible(n)) continue;
+    if (!isNodeVisible(n) || n.j) continue;
     if (wx >= n.x && wx <= n.x + n.w && wy >= n.y && wy <= n.y + n.h) return n;
   }
   return null;
@@ -893,12 +1181,14 @@ function edgeAt(clientX: number, clientY: number): GraphEdge | null {
     const a = byId.get(e.f), b = byId.get(e.t);
     if (!a || !b) continue;
     if (!isEdgeVisible(e)) continue;
-    const [x0, y0, x1, y1, x2, y2, x3, y3] = edgeCurvePoints(e, a, b);
-    if (clientX < Math.min(x0, x1, x2, x3) - TOL || clientX > Math.max(x0, x1, x2, x3) + TOL) continue;
-    if (clientY < Math.min(y0, y1, y2, y3) - TOL || clientY > Math.max(y0, y1, y2, y3) + TOL) continue;
-    let prev: [number, number] = [x0, y0];
-    for (let i = 1; i <= 16; i++) {
-      const pt = bezierPoint(x0, y0, x1, y1, x2, y2, x3, y3, i / 16);
+    const pts = edgeCurvePoints(e, a, b);
+    const xs = pts.filter((_, i) => i % 2 === 0), ys = pts.filter((_, i) => i % 2 === 1);
+    if (clientX < Math.min(...xs) - TOL || clientX > Math.max(...xs) + TOL) continue;
+    if (clientY < Math.min(...ys) - TOL || clientY > Math.max(...ys) + TOL) continue;
+    const steps = 16 * ((pts.length - 2) / 6);
+    let prev: [number, number] = [pts[0], pts[1]];
+    for (let i = 1; i <= steps; i++) {
+      const pt = pathPoint(pts, i / steps);
       const d = pointToSegDist(clientX, clientY, prev[0], prev[1], pt[0], pt[1]);
       if (d < bestDist) { bestDist = d; best = e; }
       prev = pt;
@@ -1103,7 +1393,8 @@ function runSearch(qRaw: string): void {
       const div = document.createElement("div");
       div.className = "result";
       const day = nearestDayLabel(n.y);
-      div.innerHTML = `<span class="lbl">${escapeHtml(n.t.split("\n")[0])}</span><span class="ctx">${escapeHtml(day)}</span>`;
+      const star = n.isNew ? `<span class="newStar" title="New in this update">★</span>` : "";
+      div.innerHTML = `<span class="lbl">${star}${escapeHtml(n.t.split("\n")[0])}</span><span class="ctx">${escapeHtml(day)}</span>`;
       div.addEventListener("mousedown", (ev) => { ev.stopPropagation(); selectNode(n.id); });
       resultsEl.appendChild(div);
     }
@@ -1328,6 +1619,7 @@ function applySave(rawSave: NormalizedSave): void {
   visitedRevealSet = computeVisited(rawSave, !strictPathOnly);
   obtainedSet = computeObtained(rawSave);
   updateSaveStatus();
+  buildFlagsPanel();
   draw();
 }
 
@@ -1338,13 +1630,103 @@ function clearSave(): void {
   obtainedSet = new Set();
   try { localStorage.removeItem("ntrsim-save-state"); } catch {}
   updateSaveStatus();
+  buildFlagsPanel();
   draw();
 }
+
+// ---------- Flag tracker (tracker mode, save loaded) ----------
+// Lists the Story flags the loaded save has set: route flags (ones some
+// event's eligibility depends on) first, then the rest, each with the day
+// it's set on and, where the save's own history shows where, a jump there.
+const flagsBtn = getEl<HTMLButtonElement>("flagsBtn");
+const flagsPanel = getEl("flagsPanel");
+const ROUTE_FLAGS = new Set(GRAPH.route_flags ?? []);
+function flagDisplayName(flag: string): string {
+  return GRAPH.flag_names?.[flag] ?? flag;
+}
+function flagDay(flag: string): number | null {
+  const m = (GRAPH.flag_events[flag] ?? "").match(/^(\d+)/);
+  return m ? Number(m[1]) : null;
+}
+/** The node where this save set `flag`: one its own chat history visited
+ *  that announces "<flag> Flag Triggered" (on the node, or on the line into
+ *  it). Only visited ones, so this never reveals a choice the save didn't
+ *  make. */
+function flagSourceNode(flag: string): string | null {
+  const needle = `${flagDisplayName(flag)} Flag Triggered`;
+  for (const n of GRAPH.nodes) if (n.t.includes(needle) && visitedRevealSet.has(n.id)) return n.id;
+  for (const e of GRAPH.edges) if (e.l && e.l.includes(needle) && visitedRevealSet.has(e.t)) return e.t;
+  return null;
+}
+function buildFlagsPanel(): void {
+  flagsBtn.style.display = saveState ? "inline-block" : "none";
+  if (!saveState) {
+    hideFlagsPanel();
+    return;
+  }
+  const flags = saveState.flags.slice().sort((a, b) => (flagDay(a) ?? 999) - (flagDay(b) ?? 999) || a.localeCompare(b));
+  flagsBtn.textContent = `Flags (${flags.length})`;
+  flagsPanel.textContent = "";
+  const sections: [string, string[]][] = [
+    ["Route flags", flags.filter((f) => ROUTE_FLAGS.has(f))],
+    ["Other flags", flags.filter((f) => !ROUTE_FLAGS.has(f))],
+  ];
+  if (!flags.length) {
+    const p = document.createElement("p");
+    p.className = "flagsEmpty";
+    p.textContent = "This save hasn't set any flags yet.";
+    flagsPanel.appendChild(p);
+  }
+  for (const [title, list] of sections) {
+    if (!list.length) continue;
+    const h = document.createElement("h4");
+    h.textContent = title;
+    flagsPanel.appendChild(h);
+    const ul = document.createElement("ul");
+    for (const flag of list) {
+      const li = document.createElement("li");
+      const src = flagSourceNode(flag);
+      const row = document.createElement(src ? "button" : "div");
+      row.className = "flagRow";
+      const name = document.createElement("span");
+      name.className = "flagName";
+      name.textContent = flagDisplayName(flag);
+      const day = document.createElement("span");
+      day.className = "flagDay";
+      const d = flagDay(flag);
+      day.textContent = d != null ? `Day ${d}` : "";
+      row.append(name, day);
+      if (src) {
+        (row as HTMLButtonElement).type = "button";
+        row.title = "Show where this was set";
+        row.addEventListener("click", () => { hideFlagsPanel(); selectNode(src); });
+      }
+      li.appendChild(row);
+      ul.appendChild(li);
+    }
+    flagsPanel.appendChild(ul);
+  }
+}
+function hideFlagsPanel(): void {
+  flagsPanel.classList.remove("showing");
+  flagsBtn.classList.remove("active");
+  flagsBtn.setAttribute("aria-expanded", "false");
+}
+flagsBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const showing = flagsPanel.classList.toggle("showing");
+  flagsBtn.classList.toggle("active", showing);
+  flagsBtn.setAttribute("aria-expanded", String(showing));
+});
+document.addEventListener("mousedown", (e) => {
+  if (!flagsPanel.contains(e.target as Node) && e.target !== flagsBtn) hideFlagsPanel();
+});
 
 function applyStrictPathToggle(strict: boolean): void {
   strictPathOnly = strict;
   optStrictPath.checked = strict;
   if (saveState) visitedRevealSet = computeVisited(saveState, !strictPathOnly);
+  buildFlagsPanel();
   draw();
 }
 
@@ -1380,6 +1762,7 @@ function applyMode(mode: "tracker" | "spoiler"): void {
   for (const row of optTrackerOnlyRows) row.style.display = mode === "tracker" ? "" : "none";
   optionsPanel.classList.remove("showing");
   optionsBtn.classList.remove("active");
+  hideFlagsPanel();
   applyPillsToggle(loadPillsForMode(mode));
   clearHighlight();
   buildRouteOptions();
@@ -1420,13 +1803,43 @@ function hideWelcomeModal(): void {
   }
   welcomeModal.classList.remove("showing");
 }
-getEl("welcomeSkip").addEventListener("click", hideWelcomeModal);
+getEl("welcomeSkip").addEventListener("click", () => { hideWelcomeModal(); showPendingChangelog(); });
 getEl("welcomeTour").addEventListener("click", () => { hideWelcomeModal(); startTour(); });
 getEl("aboutBtn").addEventListener("click", showWelcomeModal);
 
 const changelogModal = getEl("changelogModal");
-getEl("changelogBtn").addEventListener("click", () => changelogModal.classList.add("showing"));
+function showChangelog(): void {
+  changelogModal.classList.add("showing");
+  try { localStorage.setItem(CHANGELOG_SEEN_KEY, LATEST_CHANGELOG); } catch {}
+}
+getEl("changelogBtn").addEventListener("click", showChangelog);
 getEl("changelogClose").addEventListener("click", () => changelogModal.classList.remove("showing"));
+
+/** Newest changelog entry's heading (its date) -- the "version" a visitor
+ *  has seen. A returning visitor whose last-seen entry is older gets the
+ *  changelog once, right after the About box (or the tour) is closed. */
+const CHANGELOG_SEEN_KEY = "ntrsim-changelog-seen";
+const LATEST_CHANGELOG = document.querySelector("#changelogList .changelogEntry h3")?.textContent?.trim() ?? "";
+let changelogPending = (() => {
+  let seen: string | null = null, returning = false;
+  try {
+    seen = localStorage.getItem(CHANGELOG_SEEN_KEY);
+    // Visitors from before this was tracked have no record yet, but any
+    // other saved explorer setting means they've been here before.
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("ntrsim-") && k !== CHANGELOG_SEEN_KEY) { returning = true; break; }
+    }
+    if (seen === null && !returning) localStorage.setItem(CHANGELOG_SEEN_KEY, LATEST_CHANGELOG);
+  } catch { return false; }
+  if (!LATEST_CHANGELOG) return false;
+  return seen === null ? returning : seen !== LATEST_CHANGELOG;
+})();
+function showPendingChangelog(): void {
+  if (!changelogPending) return;
+  changelogPending = false;
+  showChangelog();
+}
 
 interface TourStep {
   sel: string;
@@ -1464,6 +1877,7 @@ function startTour(): void {
 }
 function endTour(): void {
   tourOverlay.classList.remove("showing");
+  showPendingChangelog();
 }
 function positionTour(target: Element): void {
   const r = target.getBoundingClientRect();
@@ -1514,6 +1928,7 @@ window.addEventListener("resize", () => {
 });
 
 applyTheme(currentThemeMode());
+buildFlagsPanel();
 loadPersistedSave();
 {
   let storedMask: string | null = null;
@@ -1545,3 +1960,4 @@ resize();
   centerOn(root.x + root.w / 2, root.y + root.h / 2, 0.55, false);
 }
 if (!welcomeAcked()) showWelcomeModal();
+else showPendingChangelog();

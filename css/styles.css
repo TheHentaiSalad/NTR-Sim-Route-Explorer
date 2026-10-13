@@ -210,6 +210,11 @@ canvas {
   color: var(--muted);
 }
 
+.result .newStar {
+  color: #ffcc33;
+  margin-right: 4px;
+}
+
 #routeWrap select {
   background: var(--panel);
   color: var(--text);
@@ -381,6 +386,108 @@ canvas {
 
 #saveClearBtn:hover {
   color: var(--text);
+}
+
+#saveWrap {
+  position: relative;
+}
+
+#flagsBtn {
+  background: none;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: inherit;
+  padding: 3px 7px;
+  line-height: inherit;
+  white-space: nowrap;
+  display: none;
+}
+
+#flagsBtn:hover {
+  background: var(--edge-dim);
+}
+
+#flagsBtn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+#flagsPanel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  display: none;
+  min-width: clamp(220px, 20vw, 280px);
+  max-height: 60vh;
+  overflow: auto;
+  padding: 8px 6px;
+  z-index: 15;
+  white-space: normal;
+  line-height: 1.3;
+}
+
+#flagsPanel.showing {
+  display: block;
+}
+
+#flagsPanel h4 {
+  margin: 4px 8px 6px;
+  font-size: clamp(11px, 1vw, 12px);
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+#flagsPanel h4:not(:first-child) {
+  margin-top: 12px;
+}
+
+#flagsPanel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.flagRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: clamp(11px, 1vw, 13px);
+  text-align: left;
+}
+
+button.flagRow {
+  cursor: pointer;
+}
+
+button.flagRow:hover {
+  background: var(--edge-dim);
+}
+
+.flagName {
+  overflow-wrap: anywhere;
+}
+
+.flagDay {
+  color: var(--muted);
+  font-size: .9em;
+  white-space: nowrap;
+}
+
+.flagsEmpty {
+  margin: 6px 8px;
+  color: var(--muted);
 }
 
 #legend {
