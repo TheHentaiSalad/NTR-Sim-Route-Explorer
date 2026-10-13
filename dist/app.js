@@ -1569,6 +1569,9 @@ function loadPillsForMode(mode) {
         }
         catch { }
     }
+    // Never toggled: on by default in spoiler (All Routes) mode, off in tracker.
+    if (stored === null)
+        return mode === "spoiler";
     return stored === "1";
 }
 function applyPillsToggle(show) {
