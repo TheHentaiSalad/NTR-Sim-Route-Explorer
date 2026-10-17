@@ -225,6 +225,9 @@ canvas {
   border-radius: 10px;
   cursor: pointer;
   min-width: clamp(130px, 14vw, 170px);
+  /* Long route names (and their translations) would otherwise stretch the
+     dropdown until the toolbar wraps. */
+  max-width: clamp(170px, 18vw, 320px);
 }
 
 #legendBtn,
@@ -249,6 +252,21 @@ canvas {
 #reportBugBtn {
   display: inline-block;
   text-decoration: none;
+}
+
+#langSelect {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  cursor: pointer;
+  font-size: clamp(11px, 1vw, 13px);
+  padding: clamp(7px, 0.8vw, 9px) clamp(6px, 0.8vw, 9px);
+  border-radius: 10px;
+  pointer-events: auto;
+}
+
+#langSelect:hover {
+  background: var(--edge-dim);
 }
 
 #legendBtn:hover,

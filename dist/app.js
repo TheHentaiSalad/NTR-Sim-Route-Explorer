@@ -11,7 +11,57 @@ function readEmbeddedJson(id) {
         throw new Error(`Missing embedded data script #${id}`);
     return JSON.parse(el.textContent);
 }
-const GRAPH = readEmbeddedJson("graph-data");
+/** Set by lang/<code>.js (loaded by index.html) when a language is picked. */
+const LANG = window.__NTR_LANG;
+const GRAPH = LANG?.graph ?? readEmbeddedJson("graph-data");
+/** UI string for the active language, English fallback; fills {name} placeholders. */
+function T(key, fallback, vars = {}) {
+    let s = LANG?.ui[key] ?? fallback;
+    for (const [k, v] of Object.entries(vars))
+        s = s.replace(`{${k}}`, String(v));
+    return s;
+}
+if (LANG) {
+    document.documentElement.lang = LANG.code.replace("_", "-");
+    document.querySelectorAll("[data-i18n]").forEach((el) => {
+        const v = LANG.ui[el.dataset.i18n];
+        if (v)
+            el.textContent = v;
+    });
+    // Our own static strings from site_labels.json (they carry <strong> etc.).
+    document.querySelectorAll("[data-i18n-html]").forEach((el) => {
+        const v = LANG.ui[el.dataset.i18nHtml];
+        if (v)
+            el.innerHTML = v;
+    });
+    document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+        const v = LANG.ui[el.dataset.i18nTitle];
+        if (!v)
+            return;
+        el.title = v;
+        // Icon-only buttons (✕) also carry the tooltip text as their accessible name.
+        if (el.hasAttribute("aria-label"))
+            el.setAttribute("aria-label", v);
+    });
+    document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+        const v = LANG.ui[el.dataset.i18nPlaceholder];
+        if (v)
+            el.placeholder = v;
+    });
+}
+const langSelect = getEl("langSelect");
+langSelect.value = LANG?.code ?? "en";
+langSelect.addEventListener("change", () => {
+    const code = langSelect.value;
+    try {
+        localStorage.setItem("ntrsim-lang", code);
+    }
+    catch { }
+    // ?lang=en is explicit so it also overrides a saved non-English choice.
+    const url = new URL(location.href);
+    url.searchParams.set("lang", code);
+    location.href = url.toString();
+});
 const CHAR_LEGEND = readEmbeddedJson("char-legend-data");
 const cv = getEl("cv");
 const ctx = cv.getContext("2d");
@@ -46,7 +96,7 @@ function applyTheme(mode) {
     document.documentElement.dataset.theme = mode;
     const btn = document.getElementById("themeBtn");
     if (btn)
-        btn.textContent = isLight ? "Dark mode" : "Light mode";
+        btn.textContent = isLight ? T("darkMode", "Dark mode") : T("lightMode", "Light mode");
     buildLegend();
     draw();
 }
@@ -711,12 +761,27 @@ function wrapLines(text, maxWidth, font) {
         let line = "";
         for (const word of paragraph.split(" ")) {
             const test = line ? line + " " + word : word;
-            if (ctx.measureText(test).width > maxWidth && line) {
-                out.push(line);
-                line = word;
-            }
-            else
+            if (ctx.measureText(test).width <= maxWidth) {
                 line = test;
+                continue;
+            }
+            if (line) {
+                out.push(line);
+                line = "";
+            }
+            if (ctx.measureText(word).width <= maxWidth) {
+                line = word;
+                continue;
+            }
+            // Wider than the box on its own (Chinese/Korean has no spaces): break per character.
+            for (const ch of Array.from(word)) {
+                if (ctx.measureText(line + ch).width > maxWidth && line) {
+                    out.push(line);
+                    line = ch;
+                }
+                else
+                    line += ch;
+            }
         }
         out.push(line);
     }
@@ -908,7 +973,7 @@ function draw() {
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
         for (const { sx, sy } of blockedLabelsToDraw)
-            ctx.fillText("Disabled due to route chosen", sx, sy);
+            ctx.fillText(T("disabledRoute", "Disabled due to route chosen"), sx, sy);
         ctx.textAlign = "left";
     }
     labelRects.length = 0;
@@ -1268,10 +1333,10 @@ function handleHover(e) {
         if (showConditionPills && n.note)
             html += `<div class="cond">${escapeHtml(n.note)}</div>`;
         if (viewMode === "tracker" && saveState && blockedSet.has(n.id)) {
-            html += `<div class="blocked">Disabled due to route chosen</div>`;
+            html += `<div class="blocked">${escapeHtml(T("disabledRoute", "Disabled due to route chosen"))}</div>`;
         }
         else if (viewMode === "tracker" && saveState && n.pic && obtainedSet.has(n.id)) {
-            html += `<div class="obtained">Already unlocked</div>`;
+            html += `<div class="obtained">${escapeHtml(T("alreadyUnlocked", "Already unlocked"))}</div>`;
         }
         const day = nearestDayLabel(n.y);
         if (day)
@@ -1309,7 +1374,7 @@ function handleHover(e) {
     if (g) {
         setHovered(null);
         const count = (g.members ?? []).length;
-        showTooltip(`<b>${escapeHtml(g.label.split("\n")[0])}</b><div class="muted">${count} node${count === 1 ? "" : "s"}</div>`, e.clientX, e.clientY);
+        showTooltip(`<b>${escapeHtml(g.label.split("\n")[0])}</b><div class="muted">${count === 1 ? T("oneNode", "1 node") : T("nNodes", "{n} nodes", { n: count })}</div>`, e.clientX, e.clientY);
         cv.style.cursor = "pointer";
         return;
     }
@@ -1378,7 +1443,7 @@ function runSearch(qRaw) {
     // "new" also finds the starred nodes new in this update.
     const wantNew = q === "new";
     for (const n of pool) {
-        if (n.t.toLowerCase().includes(q) || (wantNew && n.isNew))
+        if (n.t.toLowerCase().includes(q) || (n.en && n.en.toLowerCase().includes(q)) || (wantNew && n.isNew))
             matches.push(n);
     }
     if (wantNew)
@@ -1404,7 +1469,7 @@ function runSearch(qRaw) {
         if (matches.length > 60) {
             const div = document.createElement("div");
             div.className = "result more";
-            div.textContent = `+ ${matches.length - 60} more (refine search)`;
+            div.textContent = T("more", "+ {n} more (refine search)", { n: matches.length - 60 });
             resultsEl.appendChild(div);
         }
     }
@@ -1425,12 +1490,12 @@ const routeSelect = getEl("routeSelect");
 function buildRouteOptions() {
     routeSelect.innerHTML = "";
     const blank = document.createElement("option");
-    blank.textContent = "Jump to…";
+    blank.textContent = T("jumpTo", "Jump to…");
     blank.value = "";
     routeSelect.appendChild(blank);
     if (viewMode === "tracker") {
         const grp = document.createElement("optgroup");
-        grp.label = "Pictures";
+        grp.label = T("pictures", "Pictures");
         pictureNodes.forEach((n) => {
             const opt = document.createElement("option");
             opt.value = "n:" + n.id;
@@ -1441,9 +1506,9 @@ function buildRouteOptions() {
     }
     else {
         const dayOpts = document.createElement("optgroup");
-        dayOpts.label = "Days";
+        dayOpts.label = T("days", "Days");
         const routeOpts = document.createElement("optgroup");
-        routeOpts.label = "Route branches";
+        routeOpts.label = T("routeBranches", "Route branches");
         GRAPH.routes.forEach((r, i) => {
             const opt = document.createElement("option");
             opt.value = "r:" + i;
@@ -1471,23 +1536,27 @@ buildRouteOptions();
 const legendEl = getEl("legend");
 const legendBtn = getEl("legendBtn");
 function buildLegend() {
-    let html = "<h4>Characters</h4>";
+    const L = (key, fallback) => escapeHtml(T(key, fallback));
+    let html = `<h4>${L("lgCharacters", "Characters")}</h4>`;
     for (const [name, hex] of Object.entries(CHAR_LEGEND.chars)) {
         html += `<div class="legend-row"><span class="swatch" style="background:${hex}"></span>${name}</div>`;
     }
-    html += "<h4>Other</h4>";
-    html += `<div class="legend-row"><span class="swatch" style="background:${CHAR_LEGEND.day}"></span>Day header</div>`;
-    html += `<div class="legend-row"><span class="swatch" style="background:${CHAR_LEGEND.leak}"></span>Leaked content</div>`;
-    html += `<div class="legend-row"><span class="swatch" style="background:${THEME.nodeDefault};border-color:${THEME.nodeBorder}"></span>Narration / choice</div>`;
-    html += "<h4>Edges</h4>";
-    html += `<div class="legend-row">&#8212; solid: main branch (tree)</div>`;
-    html += `<div class="legend-row">&#8211;&#8211; dashed: reconverges here too</div>`;
-    html += `<div class="legend-row condition">condition text: shown on the edge</div>`;
-    html += "<h4>Route groups</h4>";
-    html += `<div class="legend-row">tinted by the character they belong to; click a group to bring its nodes forward</div>`;
-    html += "<h4>Tracker Mode (with a save loaded)</h4>";
-    html += `<div class="legend-row"><span class="swatch" style="background:none;border-color:#3fc98a;border-width:2px"></span>already unlocked</div>`;
-    html += `<div class="legend-row"><span class="swatch" style="background:${THEME.edgeDim};border-color:${THEME.edge}"></span>disabled due to route chosen</div>`;
+    html += `<h4>${L("lgOther", "Other")}</h4>`;
+    html += `<div class="legend-row"><span class="swatch" style="background:${CHAR_LEGEND.day}"></span>${L("lgDayHeader", "Day header")}</div>`;
+    html += `<div class="legend-row"><span class="swatch" style="background:${CHAR_LEGEND.leak}"></span>${L("lgLeaked", "Leaked content")}</div>`;
+    html += `<div class="legend-row"><span class="swatch" style="background:${THEME.nodeDefault};border-color:${THEME.nodeBorder}"></span>${L("lgNarration", "Narration / choice")}</div>`;
+    html += `<h4>${L("lgEdges", "Edges")}</h4>`;
+    html += `<div class="legend-row">&#8212; ${L("lgSolid", "solid: main branch (tree)")}</div>`;
+    html += `<div class="legend-row">&#8211;&#8211; ${L("lgDashed", "dashed: reconverges here too")}</div>`;
+    html += `<div class="legend-row condition">${L("lgCondition", "condition text: shown on the edge")}</div>`;
+    html += `<h4>${L("lgGroups", "Route groups")}</h4>`;
+    html += `<div class="legend-row">${L("lgGroupsText", "tinted by the character they belong to; click a group to bring its nodes forward")}</div>`;
+    // Only meaningful in Tracker Mode; applyMode rebuilds the legend on switch.
+    if (viewMode === "tracker") {
+        html += `<h4>${L("lgTracker", "Tracker Mode (with a save loaded)")}</h4>`;
+        html += `<div class="legend-row"><span class="swatch" style="background:none;border-color:#3fc98a;border-width:2px"></span>${L("lgUnlocked", "already unlocked")}</div>`;
+        html += `<div class="legend-row"><span class="swatch" style="background:${THEME.edgeDim};border-color:${THEME.edge}"></span>${L("lgDisabled", "disabled due to route chosen")}</div>`;
+    }
     legendEl.innerHTML = html;
 }
 legendEl.style.display = "block";
@@ -1634,16 +1703,16 @@ document.addEventListener("mousedown", (e) => {
 });
 function updateSaveStatus() {
     if (!saveState) {
-        saveStatus.textContent = "No save loaded";
+        saveStatus.textContent = T("noSave", "No save loaded");
         saveClearBtn.style.display = "none";
         return;
     }
-    const day = saveState.currentDay != null ? `Day ${saveState.currentDay}` : saveState.activeEventId || "unknown point";
-    saveStatus.textContent = `Save: ${day}`;
+    const day = saveState.currentDay != null ? T("dayN", "Day {n}", { n: saveState.currentDay }) : saveState.activeEventId || T("unknownPoint", "unknown point");
+    saveStatus.textContent = T("savePrefix", "Save: {day}", { day });
     saveStatus.title = [
-        saveState.slotName && `Slot: ${saveState.slotName}`,
-        saveState.saveTime && `Saved: ${saveState.saveTime}`,
-        saveState.gameVersion && `Game v${saveState.gameVersion}`,
+        saveState.slotName && T("slot", "Slot: {x}", { x: saveState.slotName }),
+        saveState.saveTime && T("saved", "Saved: {x}", { x: saveState.saveTime }),
+        saveState.gameVersion && T("gameVersion", "Game v{x}", { x: saveState.gameVersion }),
     ].filter(Boolean).join("\n");
     saveClearBtn.style.display = "inline-block";
 }
@@ -1689,12 +1758,15 @@ function flagDay(flag) {
  *  make. */
 function flagSourceNode(flag) {
     const needle = `${flagDisplayName(flag)} Flag Triggered`;
+    // English text: the needle is English, and translated maps keep it in en/le.
     for (const n of GRAPH.nodes)
-        if (n.t.includes(needle) && visitedRevealSet.has(n.id))
+        if ((n.en ?? n.t).includes(needle) && visitedRevealSet.has(n.id))
             return n.id;
-    for (const e of GRAPH.edges)
-        if (e.l && e.l.includes(needle) && visitedRevealSet.has(e.t))
+    for (const e of GRAPH.edges) {
+        const l = e.le ?? e.l;
+        if (l && l.includes(needle) && visitedRevealSet.has(e.t))
             return e.t;
+    }
     return null;
 }
 function buildFlagsPanel() {
@@ -1704,16 +1776,16 @@ function buildFlagsPanel() {
         return;
     }
     const flags = saveState.flags.slice().sort((a, b) => (flagDay(a) ?? 999) - (flagDay(b) ?? 999) || a.localeCompare(b));
-    flagsBtn.textContent = `Flags (${flags.length})`;
+    flagsBtn.textContent = T("flagsCount", "Flags ({n})", { n: flags.length });
     flagsPanel.textContent = "";
     const sections = [
-        ["Route flags", flags.filter((f) => ROUTE_FLAGS.has(f))],
-        ["Other flags", flags.filter((f) => !ROUTE_FLAGS.has(f))],
+        [T("routeFlags", "Route flags"), flags.filter((f) => ROUTE_FLAGS.has(f))],
+        [T("otherFlags", "Other flags"), flags.filter((f) => !ROUTE_FLAGS.has(f))],
     ];
     if (!flags.length) {
         const p = document.createElement("p");
         p.className = "flagsEmpty";
-        p.textContent = "This save hasn't set any flags yet.";
+        p.textContent = T("noFlags", "This save hasn't set any flags yet.");
         flagsPanel.appendChild(p);
     }
     for (const [title, list] of sections) {
@@ -1734,11 +1806,11 @@ function buildFlagsPanel() {
             const day = document.createElement("span");
             day.className = "flagDay";
             const d = flagDay(flag);
-            day.textContent = d != null ? `Day ${d}` : "";
+            day.textContent = d != null ? T("dayN", "Day {n}", { n: d }) : "";
             row.append(name, day);
             if (src) {
                 row.type = "button";
-                row.title = "Show where this was set";
+                row.title = T("tipFlagRow", "Show where this was set");
                 row.addEventListener("click", () => { hideFlagsPanel(); selectNode(src); });
             }
             li.appendChild(row);
@@ -1786,7 +1858,7 @@ saveFileInput.addEventListener("change", async () => {
         applySave(normalized);
     }
     catch {
-        saveStatus.textContent = "Could not read that save file";
+        saveStatus.textContent = T("badSave", "Could not read that save file");
     }
     saveFileInput.value = "";
 });
@@ -1809,6 +1881,7 @@ function applyMode(mode) {
     trackerModeBtn.classList.toggle("active", mode === "tracker");
     spoilerModeBtn.classList.toggle("active", mode === "spoiler");
     saveWrap.style.display = mode === "tracker" ? "flex" : "none";
+    buildLegend();
     for (const row of optTrackerOnlyRows)
         row.style.display = mode === "tracker" ? "" : "none";
     optionsPanel.classList.remove("showing");
