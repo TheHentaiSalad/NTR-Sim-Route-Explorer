@@ -410,7 +410,8 @@ canvas {
   position: relative;
 }
 
-#flagsBtn {
+#flagsBtn,
+#statsBtn {
   background: none;
   border: 1px solid var(--panel-border);
   border-radius: 6px;
@@ -423,16 +424,19 @@ canvas {
   display: none;
 }
 
-#flagsBtn:hover {
+#flagsBtn:hover,
+#statsBtn:hover {
   background: var(--edge-dim);
 }
 
-#flagsBtn.active {
+#flagsBtn.active,
+#statsBtn.active {
   border-color: var(--accent);
   color: var(--accent);
 }
 
-#flagsPanel {
+#flagsPanel,
+#statsPanel {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
@@ -446,11 +450,13 @@ canvas {
   line-height: 1.3;
 }
 
-#flagsPanel.showing {
+#flagsPanel.showing,
+#statsPanel.showing {
   display: block;
 }
 
-#flagsPanel h4 {
+#flagsPanel h4,
+#statsPanel h4 {
   margin: 4px 8px 6px;
   font-size: clamp(11px, 1vw, 12px);
   color: var(--muted);
@@ -459,8 +465,79 @@ canvas {
   text-transform: uppercase;
 }
 
-#flagsPanel h4:not(:first-child) {
+#flagsPanel h4:not(:first-child),
+#statsPanel h4:not(:first-child) {
   margin-top: 12px;
+}
+
+/* Stat tracker: Mabel's meters drawn like the game's character page. */
+.statMeter {
+  margin: 0 8px 12px;
+  font-size: clamp(11px, 1vw, 13px);
+}
+
+.statHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.statValue {
+  color: var(--muted);
+  font-size: .9em;
+  white-space: nowrap;
+}
+
+.statBar {
+  position: relative;
+  height: 8px;
+  margin: 5px 0 3px;
+  border-radius: 4px;
+  background: var(--edge-dim);
+  overflow: hidden;
+}
+
+.statFill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 4px;
+}
+
+/* Where the route split sits: Trust 50 (NTR/NTS), Desire 0 (Lust/Love). */
+.statMark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--muted);
+  opacity: .7;
+}
+
+.statAxis {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: .85em;
+}
+
+.heartRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 3px 8px;
+  font-size: clamp(11px, 1vw, 13px);
+}
+
+.heartRow.none {
+  color: var(--muted);
+}
+
+.heartCount {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 #flagsPanel ul {

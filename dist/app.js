@@ -165,6 +165,8 @@ const edgeDetour = new Map();
         const yB = Math.min(y3 - 12, Math.max(...inWay.map((n) => n.y + n.h)) + 10);
         // Try the right and left, further out each step; keep the first
         // (smallest) swing that clears every node, else the one hitting fewest.
+        // When both sides clear, take the shorter way round.
+        const sway = (c) => Math.abs(c - x0) + Math.abs(c - x3);
         let best = null;
         for (let step = 1; step <= 30 && !(best && best[0] === 0); step++) {
             for (const side of [1, -1]) {
@@ -172,10 +174,8 @@ const edgeDetour = new Map();
                 const c = side > 0 ? Math.max(...xs) + 30 * step : Math.min(...xs) - 30 * step;
                 const d = { c, yA, yB };
                 const hits = blockersOf(detourPoints(x0, y0, x3, y3, d), a, b).size;
-                if (!best || hits < best[0])
+                if (!best || hits < best[0] || (hits === best[0] && sway(c) < sway(best[1].c)))
                     best = [hits, d];
-                if (hits === 0)
-                    break;
             }
         }
         if (best)
@@ -1063,7 +1063,8 @@ function edgeCurvePoints(e, a, b) {
  *  only matters for the minimum bend (40 screen px) of a normal edge. */
 function edgeWorldPoints(e, a, b, scale) {
     if (e.par) {
-        const x0 = a.x + a.w, y0 = a.y + a.h / 2, x3 = b.x, y3 = b.y + b.h / 2;
+        const leftward = b.x < a.x;
+        const x0 = leftward ? a.x : a.x + a.w, y0 = a.y + a.h / 2, x3 = leftward ? b.x + b.w : b.x, y3 = b.y + b.h / 2;
         const midX = (x0 + x3) / 2;
         return [x0, y0, midX, y0, midX, y3, x3, y3];
     }
@@ -1319,7 +1320,9 @@ function handleHover(e) {
     if (pill) {
         setHovered(null);
         const a = byId.get(pill.f), b = byId.get(pill.t);
-        let html = `<b>${escapeHtml(a.t.split("\n")[0])}</b> &rarr; <b>${escapeHtml(b.t.split("\n")[0])}</b>`;
+        // A blank name is a junction dot, where several paths meet before going on.
+        const edgeEnd = (n) => n.t.split("\n")[0] || "Merge point";
+        let html = `<b>${escapeHtml(edgeEnd(a))}</b> &rarr; <b>${escapeHtml(edgeEnd(b))}</b>`;
         if (pill.l)
             html += `<div class="cond">${escapeHtml(pill.l)}</div>`;
         showTooltip(html, e.clientX, e.clientY);
@@ -1363,7 +1366,9 @@ function handleHover(e) {
     if (edge) {
         setHovered(null);
         const a = byId.get(edge.f), b = byId.get(edge.t);
-        let html = `<b>${escapeHtml(a.t.split("\n")[0])}</b> &rarr; <b>${escapeHtml(b.t.split("\n")[0])}</b>`;
+        // A blank name is a junction dot, where several paths meet before going on.
+        const edgeEnd = (n) => n.t.split("\n")[0] || "Merge point";
+        let html = `<b>${escapeHtml(edgeEnd(a))}</b> &rarr; <b>${escapeHtml(edgeEnd(b))}</b>`;
         if (showConditionPills && edge.l)
             html += `<div class="cond">${escapeHtml(edge.l)}</div>`;
         showTooltip(html, e.clientX, e.clientY);
@@ -1723,6 +1728,7 @@ function applySave(rawSave) {
     obtainedSet = computeObtained(rawSave);
     updateSaveStatus();
     buildFlagsPanel();
+    buildStatsPanel();
     draw();
 }
 function clearSave() {
@@ -1736,6 +1742,7 @@ function clearSave() {
     catch { }
     updateSaveStatus();
     buildFlagsPanel();
+    buildStatsPanel();
     draw();
 }
 // ---------- Flag tracker (tracker mode, save loaded) ----------
@@ -1834,6 +1841,162 @@ document.addEventListener("mousedown", (e) => {
     if (!flagsPanel.contains(e.target) && e.target !== flagsBtn)
         hideFlagsPanel();
 });
+// ---------- Stat tracker (tracker mode, save loaded) ----------
+// Mabel's Trust (0..100, Distrust <-> Faith) and Desire (-50..50, Lust <->
+// Love) meters as the game's character page draws them, plus how many hearts
+// each character has. All read straight from the save's Story variables.
+const statsBtn = getEl("statsBtn");
+const statsPanel = getEl("statsPanel");
+// Heart colour -> character, as the dialogue hands them out (build_canvas.HEART_MAP).
+const HEART_CHARS = [
+    ["pink_heart", "Mabel", "🩷"],
+    ["red_heart", "Naomi", "❤️"],
+    ["black_heart", "Nina", "🖤"],
+    ["yellow_heart", "Erika", "💛"],
+    ["brown_heart", "Valerie", "🤎"],
+    ["purple_heart", "Jessica", "💜"],
+    ["orange_heart", "Suzanna", "🧡"],
+    ["blue_heart", "Paige", "💙"],
+    ["white_heart", "Alice", "🤍"],
+];
+function statNum(name) {
+    const v = Number(saveState?.vars[name]);
+    return saveState && saveState.vars[name] != null && isFinite(v) ? Math.round(v) : null;
+}
+// Same bands as character_info_page.gd's _get_trust_descriptor / _get_desire_descriptor.
+function trustDescriptor(v) {
+    const bands = [
+        [5, "trustCompleteDistrust", "Complete Distrust"], [15, "trustSuspicious", "Suspicious"],
+        [25, "trustWary", "Wary"], [35, "trustGuarded", "Guarded"], [45, "trustHesitant", "Hesitant"],
+    ];
+    for (const [lim, key, en] of bands)
+        if (v < lim)
+            return T(key, en);
+    const upper = [
+        [55, "trustComfortable", "Comfortable"], [65, "trustOpen", "Open"],
+        [75, "trustReliant", "Reliant"], [85, "trustDevoted", "Devoted"],
+    ];
+    for (const [lim, key, en] of upper)
+        if (v <= lim)
+            return T(key, en);
+    return T("trustUnconditional", "Unconditional");
+}
+function desireDescriptor(v) {
+    const lower = [
+        [-45, "desireDeeplyRomantic", "Deeply Romantic"], [-35, "desireLovesick", "Lovesick"],
+        [-25, "desireHeartFocused", "Heart-Focused"], [-15, "desireEmotionallyDriven", "Emotionally Driven"],
+        [-5, "desireTender", "Tender"], [0, "desireSlightlyTender", "Slightly Tender"],
+    ];
+    for (const [lim, key, en] of lower)
+        if (v < lim)
+            return T(key, en);
+    if (v === 0)
+        return T("desireBalanced", "Balanced");
+    const upper = [
+        [5, "desireSlightlyEager", "Slightly Eager"], [15, "desireCurious", "Curious"],
+        [25, "desireEager", "Eager"], [35, "desireHungry", "Hungry"], [45, "desireCraving", "Craving"],
+    ];
+    for (const [lim, key, en] of upper)
+        if (v <= lim)
+            return T(key, en);
+    return T("desireInsatiable", "Insatiable");
+}
+/** One meter. `from`/`to` are 0..1 positions of the filled part, `mark` where
+ *  the route split sits. */
+function statMeter(title, value, from, to, mark, color, left, right) {
+    const box = document.createElement("div");
+    box.className = "statMeter";
+    const head = document.createElement("div");
+    head.className = "statHead";
+    const name = document.createElement("span");
+    name.textContent = title;
+    const val = document.createElement("span");
+    val.className = "statValue";
+    val.textContent = value;
+    head.append(name, val);
+    const bar = document.createElement("div");
+    bar.className = "statBar";
+    const fill = document.createElement("div");
+    fill.className = "statFill";
+    fill.style.left = `${Math.min(from, to) * 100}%`;
+    fill.style.width = `${Math.abs(to - from) * 100}%`;
+    fill.style.background = color;
+    const tick = document.createElement("div");
+    tick.className = "statMark";
+    tick.style.left = `${mark * 100}%`;
+    bar.append(fill, tick);
+    const axis = document.createElement("div");
+    axis.className = "statAxis";
+    const l = document.createElement("span");
+    l.textContent = left;
+    const r = document.createElement("span");
+    r.textContent = right;
+    axis.append(l, r);
+    box.append(head, bar, axis);
+    return box;
+}
+function buildStatsPanel() {
+    statsBtn.style.display = saveState ? "inline-block" : "none";
+    if (!saveState) {
+        hideStatsPanel();
+        return;
+    }
+    statsPanel.textContent = "";
+    const h = document.createElement("h4");
+    h.textContent = "Mabel";
+    statsPanel.appendChild(h);
+    const trust = statNum("mabel_trust");
+    const desire = statNum("mabel_desire");
+    if (trust != null) {
+        const t = Math.max(0, Math.min(100, trust));
+        statsPanel.appendChild(statMeter(T("trust", "Trust"), `${trustDescriptor(t)} (${t})`, 0, t / 100, 0.5, t < 50 ? "#d9534f" : "#5cb85c", `💔 ${T("distrust", "Distrust")}`, `${T("faith", "Faith")} 🫶`));
+    }
+    if (desire != null) {
+        // The game draws Desire mirrored: Lust on the left for positive values.
+        const d = Math.max(-50, Math.min(50, desire));
+        const pos = (50 - d) / 100;
+        statsPanel.appendChild(statMeter(T("desire", "Desire"), `${desireDescriptor(d)} (${Math.abs(d)})`, 0.5, pos, 0.5, d > 0 ? "#a64de6" : "#e64d4d", `😈 ${T("lust", "Lust")}`, `${T("love", "Love")} 🥰`));
+    }
+    if (trust == null && desire == null) {
+        const p = document.createElement("p");
+        p.className = "flagsEmpty";
+        p.textContent = T("noStats", "This save doesn't include Mabel's stats.");
+        statsPanel.appendChild(p);
+    }
+    const hh = document.createElement("h4");
+    hh.textContent = T("hearts", "Hearts");
+    statsPanel.appendChild(hh);
+    const rows = HEART_CHARS.map(([v, who, emoji]) => [who, emoji, statNum(v) ?? 0]);
+    const green = statNum("green_heart");
+    if (green)
+        rows.push([T("greenHeart", "Green heart"), "💚", green]);
+    for (const [who, emoji, n] of rows) {
+        const row = document.createElement("div");
+        row.className = "heartRow" + (n ? "" : " none");
+        const name = document.createElement("span");
+        name.textContent = `${emoji} ${who}`;
+        const count = document.createElement("span");
+        count.className = "heartCount";
+        count.textContent = String(n);
+        row.append(name, count);
+        statsPanel.appendChild(row);
+    }
+}
+function hideStatsPanel() {
+    statsPanel.classList.remove("showing");
+    statsBtn.classList.remove("active");
+    statsBtn.setAttribute("aria-expanded", "false");
+}
+statsBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const showing = statsPanel.classList.toggle("showing");
+    statsBtn.classList.toggle("active", showing);
+    statsBtn.setAttribute("aria-expanded", String(showing));
+});
+document.addEventListener("mousedown", (e) => {
+    if (!statsPanel.contains(e.target) && e.target !== statsBtn)
+        hideStatsPanel();
+});
 function applyStrictPathToggle(strict) {
     strictPathOnly = strict;
     optStrictPath.checked = strict;
@@ -1887,6 +2050,7 @@ function applyMode(mode) {
     optionsPanel.classList.remove("showing");
     optionsBtn.classList.remove("active");
     hideFlagsPanel();
+    hideStatsPanel();
     applyPillsToggle(loadPillsForMode(mode));
     clearHighlight();
     buildRouteOptions();
@@ -2078,6 +2242,7 @@ window.addEventListener("resize", () => {
 });
 applyTheme(currentThemeMode());
 buildFlagsPanel();
+buildStatsPanel();
 loadPersistedSave();
 {
     let storedMask = null;
