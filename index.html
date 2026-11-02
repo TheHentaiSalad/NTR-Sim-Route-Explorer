@@ -17,6 +17,7 @@
         <button id="trackerModeBtn" data-i18n-title="tipTracker" data-i18n="trackerMode" type="button" title="Only show pictures; upload a save to see which you've already got">Tracker Mode</button>
         <button id="spoilerModeBtn" data-i18n-title="tipAllRoutes" data-i18n="allRoutes" type="button" title="Show the entire route tree">All Routes/Options</button>
       </div>
+      <button id="moreBtn" data-i18n-title="tipMore" type="button" aria-expanded="false" aria-controls="ui" title="More options" aria-label="More options">&#9776;</button>
 
       <div id="saveWrap">
         <span id="saveStatus" data-i18n="noSave">No save loaded</span>
@@ -29,7 +30,7 @@
         <div id="statsPanel" class="panel" role="dialog" aria-label="Stat tracker"></div>
       </div>
 
-      <div id="optionsWrap">
+      <div id="optionsWrap" class="uiExtra">
         <button id="optionsBtn" data-i18n="options" data-i18n-title="optionsTip" type="button" aria-haspopup="true" aria-expanded="false" title="Display options">Options</button>
         <div id="optionsPanel" class="panel" role="menu">
           <label class="optRow optTrackerOnly"><input type="checkbox" id="optMaskText"> <span data-i18n="optMaskText">Hide choice text until hovered</span></label>
@@ -50,18 +51,18 @@
         <div id="results" class="panel" role="listbox"></div>
       </div>
 
-      <div id="routeWrap" data-i18n-title="tipJump" class="panel" title="Jump the camera straight to a day, route branch, or picture">
+      <div id="routeWrap" data-i18n-title="tipJump" class="panel uiExtra" title="Jump the camera straight to a day, route branch, or picture">
         <label for="routeSelect" class="visually-hidden">Jump to</label>
         <select id="routeSelect"></select>
       </div>
 
-      <button id="fitBtn" data-i18n-title="tipFit" data-i18n="fit" type="button" title="Zoom out to fit the whole visible graph on screen">Fit All</button>
-      <button id="legendBtn" data-i18n-title="tipLegend" data-i18n="legend" type="button" aria-pressed="true" title="Show/hide the color-key panel">Legend</button>
-      <button id="minimapBtn" data-i18n-title="tipMinimap" data-i18n="minimap" type="button" aria-pressed="true" title="Show/hide the minimap">Minimap</button>
-      <button id="themeBtn" data-i18n-title="tipTheme" type="button" title="Toggle light/dark"></button>
-      <button id="aboutBtn" data-i18n-title="tipAbout" data-i18n="about" type="button" title="About this project, credits, and a guided tour">About</button>
-      <button id="changelogBtn" data-i18n-title="tipChangelog" data-i18n="changelog" type="button" title="What's changed in the map itself recently">Changelog</button>
-      <div id="langWrap">
+      <button id="fitBtn" class="uiExtra" data-i18n-title="tipFit" data-i18n="fit" type="button" title="Zoom out to fit the whole visible graph on screen">Fit All</button>
+      <button id="legendBtn" class="uiExtra" data-i18n-title="tipLegend" data-i18n="legend" type="button" aria-pressed="true" title="Show/hide the color-key panel">Legend</button>
+      <button id="minimapBtn" class="uiExtra" data-i18n-title="tipMinimap" data-i18n="minimap" type="button" aria-pressed="true" title="Show/hide the minimap">Minimap</button>
+      <button id="themeBtn" class="uiExtra" data-i18n-title="tipTheme" type="button" title="Toggle light/dark"></button>
+      <button id="aboutBtn" class="uiExtra" data-i18n-title="tipAbout" data-i18n="about" type="button" title="About this project, credits, and a guided tour">About</button>
+      <button id="changelogBtn" class="uiExtra" data-i18n-title="tipChangelog" data-i18n="changelog" type="button" title="What's changed in the map itself recently">Changelog</button>
+      <div id="langWrap" class="uiExtra">
         <label for="langSelect" class="visually-hidden" data-i18n="language">Language</label>
         <select id="langSelect" data-i18n-title="language" title="Language">
           <option value="en">English</option>
@@ -75,7 +76,7 @@
           <option value="zh_CN">简体中文</option>
         </select>
       </div>
-      <a id="reportBugBtn" data-i18n-title="tipReportBug" data-i18n="reportBug" href="https://github.com/TheHentaiSalad/NTR-Sim-Route-Explorer/issues/new?title=Bug%20report%3A%20&amp;body=%23%23%23%20What%20happened%0A%0A%0A%23%23%23%20What%20did%20you%20expect%20to%20happen%0A%0A%0A%23%23%23%20Steps%20to%20reproduce%0A1.%20%0A2.%20%0A3.%20%0A%0A%23%23%23%20Browser%20%26%20OS%0A%0A%0A%23%23%23%20Do%20you%20have%20a%20save%20file%20loaded%3F%20(yes%2Fno)%0A%0A%0A%23%23%23%20Screenshots%20(if%20you%20have%20any)%0A" target="_blank" rel="noopener noreferrer" title="Found a bug in the explorer itself (not the game)? Opens a new GitHub issue with a template to fill out.">Report Bug</a>
+      <a id="reportBugBtn" class="uiExtra" data-i18n-title="tipReportBug" data-i18n="reportBug" href="https://github.com/TheHentaiSalad/NTR-Sim-Route-Explorer/issues/new?title=Bug%20report%3A%20&amp;body=%23%23%23%20What%20happened%0A%0A%0A%23%23%23%20What%20did%20you%20expect%20to%20happen%0A%0A%0A%23%23%23%20Steps%20to%20reproduce%0A1.%20%0A2.%20%0A3.%20%0A%0A%23%23%23%20Browser%20%26%20OS%0A%0A%0A%23%23%23%20Do%20you%20have%20a%20save%20file%20loaded%3F%20(yes%2Fno)%0A%0A%0A%23%23%23%20Screenshots%20(if%20you%20have%20any)%0A" target="_blank" rel="noopener noreferrer" title="Found a bug in the explorer itself (not the game)? Opens a new GitHub issue with a template to fill out.">Report Bug</a>
     </header>
 
     <aside id="legend" class="panel" aria-label="Color key"></aside>
@@ -126,6 +127,7 @@
           <h3>2026-11-02</h3>
           <ul>
             <li><strong>Added:</strong> a stat tracker in Tracker Mode. With a save loaded, the new "Stats" button shows Mabel's Trust (Distrust &harr; Faith) and Desire (Lust &harr; Love) meters as the game's character page does, with a mark where each one splits the routes (Trust 50 for NTR/NTS, Desire 0 for Lust/Love), plus how many hearts you've unlocked with each character.</li>
+            <li><strong>Added:</strong> phone support. Drag to pan, pinch to zoom and tap a node to see it. On small screens the less-used buttons are tucked into a &#9776; menu.</li>
             <li><strong>Fixed:</strong> removed 24 paths from the map that can't actually happen in the game. For example, the map used to show the Day 26 Jason/Naomi and Jason/Paige events as reachable while on Jason's route, but the game only offers them when you're not on it.</li>
             <li><strong>Changed:</strong> the Day 17 NTR/NTS and Love/Lust split is drawn as its own choice on the map instead of being packed into two long condition labels.</li>
             <li><strong>Changed:</strong> condition labels read more plainly, e.g. "NTS" instead of "not NTR", and "Mabel Trust &gt;= 50" instead of "not Mabel Trust &lt; 50".</li>

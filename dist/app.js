@@ -1131,47 +1131,98 @@ function drawMinimap() {
     mmCtx.lineWidth = 1.5;
     mmCtx.strokeRect(vx0 * s + ox, vy0 * s + oy, (vx1 - vx0) * s, (vy1 - vy0) * s);
 }
-let dragging = false, dragMoved = false, lastPx = 0, lastPy = 0;
-cv.addEventListener("mousedown", (e) => {
-    dragging = true;
-    dragMoved = false;
-    lastPx = e.clientX;
-    lastPy = e.clientY;
-});
-window.addEventListener("mousemove", (e) => {
-    if (dragging) {
-        const dx = e.clientX - lastPx, dy = e.clientY - lastPy;
-        if (Math.abs(dx) + Math.abs(dy) > 3)
-            dragMoved = true;
-        cam.x -= dx / cam.scale;
-        cam.y -= dy / cam.scale;
-        lastPx = e.clientX;
-        lastPy = e.clientY;
-        setHovered(null);
-        draw();
-        tooltip.style.display = "none";
-    }
-    else if (e.target === cv) {
-        handleHover(e);
-    }
-    else {
-        setHovered(null);
-        tooltip.style.display = "none";
-    }
-});
-window.addEventListener("mouseup", (e) => {
-    if (dragging && !dragMoved)
-        handleClick(e);
-    dragging = false;
-});
-cv.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const [wx, wy] = screenToWorld(e.clientX, e.clientY);
-    const factor = Math.pow(1.0015, -e.deltaY);
+function zoomAt(clientX, clientY, factor) {
+    const [wx, wy] = screenToWorld(clientX, clientY);
     cam.scale = Math.min(4, Math.max(0.01, cam.scale * factor));
-    const [nx, ny] = screenToWorld(e.clientX, e.clientY);
+    const [nx, ny] = screenToWorld(clientX, clientY);
     cam.x += wx - nx;
     cam.y += wy - ny;
+}
+// Pointer events cover mouse and touch. Mouse: drag pans, hover shows
+// tooltips. Touch: one finger pans, two pinch-zoom, and a tap does what
+// hovering and then clicking would (so it also reveals masked choice text).
+let dragging = false, dragMoved = false, lastPx = 0, lastPy = 0, pinchDist = 0;
+const pointers = new Map();
+function pinchSpan() {
+    const [[ax, ay], [bx, by]] = [...pointers.values()];
+    return [(ax + bx) / 2, (ay + by) / 2, Math.hypot(ax - bx, ay - by)];
+}
+cv.addEventListener("pointerdown", (e) => {
+    closeMoreMenu();
+    try {
+        cv.setPointerCapture(e.pointerId);
+    }
+    catch { }
+    pointers.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pointers.size === 1) {
+        dragging = true;
+        dragMoved = false;
+        lastPx = e.clientX;
+        lastPy = e.clientY;
+    }
+    else if (pointers.size === 2) {
+        // A second finger is never a tap.
+        dragMoved = true;
+        [lastPx, lastPy, pinchDist] = pinchSpan();
+    }
+});
+window.addEventListener("pointermove", (e) => {
+    if (pointers.has(e.pointerId)) {
+        pointers.set(e.pointerId, [e.clientX, e.clientY]);
+        let px = e.clientX, py = e.clientY;
+        if (pointers.size >= 2) {
+            const [mx, my, dist] = pinchSpan();
+            if (pinchDist > 0 && dist > 0)
+                zoomAt(mx, my, dist / pinchDist);
+            pinchDist = dist;
+            px = mx;
+            py = my;
+        }
+        const dx = px - lastPx, dy = py - lastPy;
+        // Fingers wobble more than a mouse, so a tap gets more slack.
+        if (Math.abs(dx) + Math.abs(dy) > (e.pointerType === "mouse" ? 3 : 8))
+            dragMoved = true;
+        if (dragMoved) {
+            cam.x -= dx / cam.scale;
+            cam.y -= dy / cam.scale;
+            lastPx = px;
+            lastPy = py;
+            setHovered(null);
+            draw();
+            tooltip.style.display = "none";
+        }
+    }
+    else if (e.pointerType === "mouse") {
+        if (e.target === cv)
+            handleHover(e);
+        else {
+            setHovered(null);
+            tooltip.style.display = "none";
+        }
+    }
+});
+function endPointer(e, cancelled) {
+    if (!pointers.delete(e.pointerId))
+        return;
+    if (pointers.size === 1) {
+        // Pinch over: keep panning from the finger that's left.
+        [[lastPx, lastPy]] = [...pointers.values()];
+        return;
+    }
+    if (pointers.size)
+        return;
+    if (dragging && !dragMoved && !cancelled) {
+        if (e.pointerType !== "mouse")
+            handleHover(e);
+        handleClick(e);
+    }
+    dragging = false;
+}
+window.addEventListener("pointerup", (e) => endPointer(e, false));
+window.addEventListener("pointercancel", (e) => endPointer(e, true));
+cv.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoomAt(e.clientX, e.clientY, Math.pow(1.0015, -e.deltaY));
     draw();
 }, { passive: false });
 function nodeAt(clientX, clientY) {
@@ -1390,10 +1441,10 @@ function handleHover(e) {
 function showTooltip(html, clientX, clientY) {
     tooltip.innerHTML = html;
     tooltip.style.display = "block";
-    const tw = 340;
+    const tw = tooltip.offsetWidth || 340;
     let tx = clientX + 16, ty = clientY + 12;
     if (tx + tw > innerWidth)
-        tx = clientX - tw - 16;
+        tx = Math.max(8, clientX - tw - 16);
     if (ty + 140 > innerHeight)
         ty = innerHeight - 150;
     tooltip.style.left = tx + "px";
@@ -1412,10 +1463,21 @@ function minimapToWorld(clientX, clientY) {
     const ox = (mm.width - wW * s) / 2 - worldMinX * s, oy = (mm.height - wH * s) / 2 - worldMinY * s;
     return [(mx - ox) / s, (my - oy) / s];
 }
-mm.addEventListener("mousedown", (e) => {
+// Press (and drag, with a mouse or finger) to move the view around.
+mm.addEventListener("pointerdown", (e) => {
+    try {
+        mm.setPointerCapture(e.pointerId);
+    }
+    catch { }
     const [wx, wy] = minimapToWorld(e.clientX, e.clientY);
     centerOn(wx, wy, cam.scale, false);
     e.stopPropagation();
+});
+mm.addEventListener("pointermove", (e) => {
+    if (!mm.hasPointerCapture(e.pointerId))
+        return;
+    const [wx, wy] = minimapToWorld(e.clientX, e.clientY);
+    centerOn(wx, wy, cam.scale, false);
 });
 mm.addEventListener("wheel", (e) => {
     e.preventDefault();
@@ -1564,15 +1626,37 @@ function buildLegend() {
     }
     legendEl.innerHTML = html;
 }
-legendEl.style.display = "block";
-legendBtn.classList.add("active");
+// On a phone the legend and minimap would cover most of the map, so they
+// start closed there.
+const SMALL_SCREEN = matchMedia("(max-width: 640px)").matches;
+legendEl.style.display = SMALL_SCREEN ? "none" : "block";
+legendBtn.classList.toggle("active", !SMALL_SCREEN);
 legendBtn.addEventListener("click", () => {
     const showing = legendEl.style.display === "block";
     legendEl.style.display = showing ? "none" : "block";
     legendBtn.classList.toggle("active", !showing);
 });
 const minimapBtn = getEl("minimapBtn");
-minimapBtn.classList.add("active");
+if (SMALL_SCREEN)
+    mm.style.display = "none";
+minimapBtn.classList.toggle("active", !SMALL_SCREEN);
+// ☰ menu: on phones everything but the mode switch, search and save bar
+// folds into it (CSS shows .uiExtra items while #ui has .moreOpen).
+const uiEl = getEl("ui");
+const moreBtn = getEl("moreBtn");
+function setMoreMenu(open) {
+    uiEl.classList.toggle("moreOpen", open);
+    moreBtn.classList.toggle("active", open);
+    moreBtn.setAttribute("aria-expanded", String(open));
+}
+function closeMoreMenu() {
+    setMoreMenu(false);
+}
+moreBtn.addEventListener("click", () => setMoreMenu(!uiEl.classList.contains("moreOpen")));
+// Ones that change the view close it so the map shows again.
+for (const id of ["fitBtn", "legendBtn", "minimapBtn", "aboutBtn", "changelogBtn"])
+    getEl(id).addEventListener("click", closeMoreMenu);
+getEl("routeSelect").addEventListener("change", closeMoreMenu);
 minimapBtn.addEventListener("click", () => {
     const showing = mm.style.display !== "none";
     mm.style.display = showing ? "none" : "block";
@@ -2180,10 +2264,13 @@ const tourBackBtn = getEl("tourBack");
 const tourNextBtn = getEl("tourNext");
 function startTour() {
     applyMode("tracker");
+    // Phones keep most of the toolbar in the ☰ menu; open it so the tour can point at them.
+    setMoreMenu(true);
     tourOverlay.classList.add("showing");
     showTourStep(0);
 }
 function endTour() {
+    closeMoreMenu();
     tourOverlay.classList.remove("showing");
     showPendingChangelog();
 }
@@ -2210,7 +2297,8 @@ function showTourStep(i) {
     const dir = i >= tourIndex ? 1 : -1;
     while (i >= 0 && i < TOUR_STEPS.length) {
         const target = document.querySelector(TOUR_STEPS[i].sel);
-        if (target) {
+        // Skip ones hidden at this screen size (e.g. the mouse hint on phones).
+        if (target && target.getClientRects().length) {
             tourIndex = i;
             const step = TOUR_STEPS[i];
             tourText.innerHTML = `<h4>${escapeHtml(step.title)}</h4><p>${escapeHtml(step.text)}</p>`;

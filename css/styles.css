@@ -1128,6 +1128,18 @@ button.flagRow:hover {
   background: var(--accent);
 }
 
+/* The map handles its own touch gestures (pan, pinch-zoom, tap). */
+#cv,
+#minimap {
+  touch-action: none;
+}
+
+#moreBtn {
+  display: none;
+}
+
+/* Phones: mode switch + menu button, then search, then the save bar. The
+   rest of the toolbar folds into the ☰ menu. */
 @media (max-width: 640px) {
   #ui {
     top: 8px;
@@ -1136,10 +1148,85 @@ button.flagRow:hover {
     gap: 6px;
   }
 
+  #moreBtn {
+    display: block;
+    margin-left: auto;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 6px 12px;
+    pointer-events: auto;
+  }
+
+  #moreBtn.active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
   #searchWrap {
     flex-basis: 100%;
     max-width: none;
+    min-width: 0;
     order: 1;
+    /* Its results drop down over the save bar below it. */
+    z-index: 16;
+  }
+
+  #saveWrap {
+    order: 2;
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+
+  #ui .uiExtra {
+    display: none;
+    order: 3;
+  }
+
+  #ui.moreOpen .uiExtra {
+    display: block;
+  }
+
+  #ui.moreOpen #reportBugBtn {
+    display: inline-block;
+  }
+
+  #routeSelect {
+    max-width: calc(100vw - 32px);
+  }
+
+  #optionsPanel,
+  #flagsPanel,
+  #statsPanel {
+    max-width: calc(100vw - 16px);
+  }
+
+  #flagsPanel,
+  #statsPanel {
+    min-width: min(280px, calc(100vw - 16px));
+  }
+
+  /* Legend as a sheet along the bottom instead of a column over the map. */
+  #legend {
+    top: auto;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    min-width: 0;
+    max-height: 45vh;
+  }
+
+  #minimap {
+    bottom: 8px;
+    right: 8px;
+  }
+
+  #tooltip {
+    max-width: calc(100vw - 16px);
   }
 
   #hint {
