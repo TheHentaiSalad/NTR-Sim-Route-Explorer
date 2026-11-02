@@ -15,6 +15,17 @@ interface GraphNode {
   en?: string;
   /** Junction point: several paths reconverge here before the next branch. */
   j?: boolean;
+  /** A choice the player picks. */
+  ch?: boolean;
+  /** The choice's own reply lines: a save's history shows these when it was picked. */
+  pk?: string[];
+  /** A leaked-message replay: drawn beside the story, played along it. */
+  lk?: boolean;
+  /** Route tracer data (see build_canvas/driver): conditions to enter, as raw
+   *  AND-groups OR'd together; effects of entering; events it starts. */
+  rc?: string[][];
+  fx?: Effect[];
+  ev?: string[];
 }
 
 interface GraphEdge {
@@ -28,7 +39,14 @@ interface GraphEdge {
   raw: string[][] | null;
   /** English label, only on translated maps where it differs from `l`. */
   le?: string;
+  /** Route tracer data: full condition (raw AND-groups OR'd together) and the
+   *  effects of the branches leading onto it, each under its own condition. */
+  rc?: string[][];
+  fx?: { e: Effect[]; c: string[][] | null }[];
 }
+
+/** [var, op, value]: ["flag", "=", "Date3"], ["mabel_trust", "+", -2], ["black_heart", "=", 1]. */
+type Effect = [string, string, string | number];
 
 interface GraphGroup {
   label: string;
@@ -55,6 +73,8 @@ interface GraphData {
   flag_events: Record<string, string>;
   route_flags?: string[];
   flag_names?: Record<string, string>;
+  /** uid://... -> "week1/6day": some chats save their dialogue by uid. */
+  dialogue_uids?: Record<string, string>;
 }
 
 interface CharLegend {
@@ -451,6 +471,13 @@ let visitedRevealSet = new Set<string>();
 let obtainedSet = new Set<string>();
 let hoveredNodeId: string | null = null;
 
+/** "uid://c8arno2jt1kpo:12" -> "week1/6day:12" (2day, 2night, 6day and 7day
+ *  save their chat history by uid; without this those chats look unvisited). */
+function fixUidLine(line: string): string {
+  const m = line.match(/^(uid:\/\/[a-z0-9]+):(.*)$/);
+  const file = m && GRAPH.dialogue_uids?.[m[1]];
+  return file ? `${file}:${m![2]}` : line;
+}
 function normalizeSave(raw: RawSaveFile): NormalizedSave {
   const sd = raw?.files?.["storyline_data.json"];
   const au = sd?.autoload_state;
@@ -467,7 +494,7 @@ function normalizeSave(raw: RawSaveFile): NormalizedSave {
     for (const msg of hist) {
       if (!msg.dialogue_file || msg.current_id == null || msg.current_id === "") continue;
       const shorthand = msg.dialogue_file.replace(/^res:\/\//, "").replace(/^assets\/dialogue\//, "").replace(/\.dialogue$/, "");
-      visited.push(shorthand + ":" + msg.current_id);
+      visited.push(fixUidLine(shorthand + ":" + msg.current_id));
     }
   }
   return {
@@ -741,12 +768,650 @@ function ancestorConditions(id: string): string[] {
   return labels;
 }
 
+/* ---------- One route that works, to a clicked node ----------
+ * After AveKore's route-to-node idea (GitHub issue #1). Clicking a node lights up
+ * ONE chain from Day 1 whose conditions all hold, instead of every ancestor:
+ * the walk goes forward with the game's own state (flags, Mabel's Trust and
+ * Desire, every heart, finished events), starting where a new game does, and
+ * applies each step's real effects from the map data (`rc`/`fx`, written by the
+ * pipeline from the scripts). That data is the same in every language. What the
+ * map doesn't track (kisses, phone unlocks) can't be checked: those steps are
+ * assumed and drawn amber. The other ancestors stay faint; clicking one routes
+ * through it. */
+
+type Expr =
+  | { k: "lit"; v: string | number | boolean }
+  | { k: "ref"; name: string }
+  | { k: "call"; name: string; args: Expr[] }
+  | { k: "not"; a: Expr }
+  | { k: "and" | "or"; a: Expr; b: Expr }
+  | { k: "cmp"; op: string; a: Expr; b: Expr };
+
+const TOKEN_RE = /\s*(?:(-?\d+(?:\.\d+)?)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(==|!=|<=|>=|&&|\|\||[<>()!,])|([A-Za-z_][\w.]*))/y;
+/** A raw GDScript condition from the scripts, or null if it won't parse (then unknown). */
+function parseCond(src: string): Expr | null {
+  const toks: string[] = [];
+  const text = src.replace(/\\(["'])/g, "$1");
+  TOKEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while (TOKEN_RE.lastIndex < text.length && (m = TOKEN_RE.exec(text))) toks.push(m[0].trim());
+  if (TOKEN_RE.lastIndex < text.trimEnd().length) return null;
+  let i = 0;
+  const peek = () => toks[i];
+  const orE = (): Expr => {
+    let a = andE();
+    while (peek() === "or" || peek() === "||") { i++; a = { k: "or", a, b: andE() }; }
+    return a;
+  };
+  const andE = (): Expr => {
+    let a = notE();
+    while (peek() === "and" || peek() === "&&") { i++; a = { k: "and", a, b: notE() }; }
+    return a;
+  };
+  const notE = (): Expr => {
+    if (peek() === "not" || peek() === "!") { i++; return { k: "not", a: notE() }; }
+    const a = prim();
+    const op = peek();
+    if (op && /^(==|!=|<=|>=|<|>)$/.test(op)) { i++; return { k: "cmp", op, a, b: prim() }; }
+    return a;
+  };
+  const prim = (): Expr => {
+    const t = toks[i++];
+    if (t === undefined) throw new Error("end");
+    if (t === "(") { const e = orE(); if (toks[i++] !== ")") throw new Error(")"); return e; }
+    if (/^-?\d/.test(t)) return { k: "lit", v: Number(t) };
+    if (/^["']/.test(t)) return { k: "lit", v: t.slice(1, -1) };
+    if (t === "true" || t === "false") return { k: "lit", v: t === "true" };
+    if (!/^[A-Za-z_]/.test(t)) throw new Error(t);
+    if (peek() === "(") {
+      i++;
+      const args: Expr[] = [];
+      while (peek() !== ")") { args.push(orE()); if (peek() === ",") i++; else if (peek() !== ")") throw new Error(","); }
+      i++;
+      return { k: "call", name: t, args };
+    }
+    return { k: "ref", name: t };
+  };
+  try {
+    const e = orE();
+    return i === toks.length ? e : null;
+  } catch {
+    return null;
+  }
+}
+const condCache = new Map<string, Expr | null>();
+const edgeIndex = new Map<string, GraphEdge>(GRAPH.edges.map((e) => [e.id, e]));
+
+interface RouteState { flags: Set<string>; trust: number; desire: number; hearts: Map<string, number>; events: Set<string> }
+/** `stats` off: Trust and Desire count as unknown (the looser fallback search). */
+function evalExprR(e: Expr, st: RouteState, stats: boolean): string | number | boolean | undefined {
+  switch (e.k) {
+    case "lit": return e.v;
+    case "ref": {
+      const name = e.name.replace(/^Story\./, "");
+      if (name === "mabel_trust") return stats ? st.trust : undefined;
+      if (name === "mabel_desire") return stats ? st.desire : undefined;
+      const h = name.match(/^(\w+)_heart$/);
+      if (h && e.name.startsWith("Story.")) return st.hearts.get(h[1]) ?? 0;
+      return undefined;
+    }
+    case "call": {
+      const arg = e.args[0] && e.args[0].k === "lit" ? String(e.args[0].v) : undefined;
+      if (e.name === "Story.has_flag" && arg !== undefined) return st.flags.has(arg);
+      if (e.name === "EventScheduler.is_event_complete" && arg !== undefined) return st.events.has(arg);
+      // Money taken from a chat: a route is one playthrough, so not yet.
+      if (e.name === "PhoneUnlocks.is_claimed") return false;
+      return undefined;
+    }
+    case "not": {
+      const v = evalExprR(e.a, st, stats);
+      return v === undefined ? undefined : !v;
+    }
+    case "and": case "or": {
+      const a = evalExprR(e.a, st, stats), b = evalExprR(e.b, st, stats);
+      const decisive = e.k === "and" ? false : true;
+      if ((a !== undefined && !!a === decisive) || (b !== undefined && !!b === decisive)) return decisive;
+      return a === undefined || b === undefined ? undefined : !decisive;
+    }
+    case "cmp": {
+      const a = evalExprR(e.a, st, stats), b = evalExprR(e.b, st, stats);
+      if (a === undefined || b === undefined) return undefined;
+      switch (e.op) {
+        case "==": return a == b;
+        case "!=": return a != b;
+        case "<": return a < b;
+        case ">": return a > b;
+        case "<=": return a <= b;
+        default: return a >= b;
+      }
+    }
+  }
+}
+/** OR of AND-groups: true, false, or null when it hangs on something untracked. */
+function evalGroups(groups: string[][] | null | undefined, st: RouteState, stats: boolean): TriState {
+  if (!groups || !groups.length) return true;
+  return triCombine(groups.map((g) => triCombine(g.map((src) => {
+    let ex = condCache.get(src);
+    if (ex === undefined) { ex = parseCond(src); condCache.set(src, ex); }
+    if (!ex) return null;
+    const v = evalExprR(ex, st, stats);
+    return v === undefined ? null : !!v;
+  }), false)), true);
+}
+function applyEffects(st: RouteState, fx: Effect[] | undefined): void {
+  for (const [v, op, n] of fx ?? []) {
+    if (v === "flag") st.flags.add(String(n));
+    else if (v === "mabel_trust") st.trust = Math.max(0, Math.min(100, op === "=" ? Number(n) : st.trust + Number(n)));
+    else if (v === "mabel_desire") st.desire = Math.max(-50, Math.min(50, op === "=" ? Number(n) : st.desire + Number(n)));
+    else {
+      const who = v.replace(/_heart$/, "");
+      st.hearts.set(who, op === "=" ? Number(n) : (st.hearts.get(who) ?? 0) + Number(n));
+    }
+  }
+}
+function cloneRouteState(s: RouteState): RouteState {
+  return { flags: new Set(s.flags), trust: s.trust, desire: s.desire, hearts: new Map(s.hearts), events: new Set(s.events) };
+}
+/** Where a new game starts (Story.gd defaults). */
+function startState(): RouteState {
+  return { flags: new Set(), trust: 50, desire: 0, hearts: new Map(), events: new Set() };
+}
+/** What a condition looks at: "f:Flag", "e:event", "h:colour" (hearts), "s:trust", "s:desire". */
+function condTests(groups: string[][] | null | undefined, into: Set<string>): void {
+  for (const g of groups ?? []) for (const src of g) {
+    for (const m of src.matchAll(/has_flag\(\s*\\?["']([^"'\\]+)/g)) into.add(`f:${m[1]}`);
+    for (const m of src.matchAll(/is_event_complete\(\s*\\?["']([^"'\\]+)/g)) into.add(`e:${m[1]}`);
+    for (const m of src.matchAll(/Story\.(\w+)_heart\b/g)) into.add(`h:${m[1]}`);
+    if (/Story\.mabel_trust\b/.test(src)) into.add("s:trust");
+    if (/Story\.mabel_desire\b/.test(src)) into.add("s:desire");
+  }
+}
+/** What gets checked on the way in along each edge: its own condition, its
+ *  effects' conditions and the condition of the node it leads to. */
+const EDGE_TESTS = new Map<string, Set<string>>();
+for (const e of GRAPH.edges) {
+  const t = new Set<string>();
+  condTests(e.rc, t);
+  for (const x of e.fx ?? []) condTests(x.c, t);
+  condTests(byId.get(e.t)?.rc, t);
+  EDGE_TESTS.set(e.id, t);
+}
+/** A state as far as anything still ahead (`ahead`, see traceRoute) can tell:
+ *  two states equal here play out the same from now on. */
+function stateKey(s: RouteState, ahead: Set<string>, stats: boolean): string {
+  const flags = [...s.flags].filter((f) => ahead.has(`f:${f}`)).sort().join(",");
+  const hearts = [...s.hearts].filter(([c, n]) => n && ahead.has(`h:${c}`)).sort().join(",");
+  const events = [...s.events].filter((e) => ahead.has(`e:${e}`)).sort().join(",");
+  const meters = stats ? `${ahead.has("s:trust") ? s.trust : ""},${ahead.has("s:desire") ? s.desire : ""}` : "";
+  return `${flags}|${hearts}|${meters}|${events}`;
+}
+
+interface RouteStep { trust: number; desire: number; dTrust: number; dDesire: number }
+interface RouteTrace {
+  target: string;
+  nodes: string[];
+  edges: string[];
+  /** Steps resting on something the map doesn't track. */
+  unchecked: Set<string>;
+  /** "full": every tracked condition holds; "flags": Trust/Desire didn't fit,
+   *  this one only follows the rest; "any": nothing fit, just a way here. */
+  mode: "full" | "flags" | "any";
+  stats: Map<string, RouteStep>;
+  end: RouteState;
+}
+/** Game states kept per node during the search (see pruneBeams): the best
+ *  BEAM_CAP, plus the Trust/Desire extremes, never more than BEAM_HARD_CAP. */
+const BEAM_CAP = 48;
+const BEAM_HARD_CAP = 400;
+
+/** One way of reaching a node: the game state there and the step before it. */
+interface Beam {
+  st: RouteState; stage: number; node: string; edge: string | null; prev: Beam | null;
+  unsure: boolean; nUnsure: number; len: number; seen: number;
+}
+/** Better of two ways into the same state: fewer unchecked steps, more of the
+ *  save's own history, then more story on the way. */
+function beamBetter(a: Beam, b: Beam): boolean {
+  if (a.nUnsure !== b.nUnsure) return a.nUnsure < b.nUnsure;
+  if (a.seen !== b.seen) return a.seen > b.seen;
+  return a.len > b.len;
+}
+/** Keeps at most BEAM_CAP states, and for every combination of flags and hearts
+ *  the ones with the lowest and highest Trust and Desire: a check further on
+ *  ("Trust < 50", "Desire > 0") can then still be met either way. */
+function pruneBeams(set: Map<string, Beam>, stats: boolean, ahead: Set<string>): Beam[] {
+  const all = [...set.values()];
+  if (all.length <= BEAM_CAP) return all;
+  const keep = new Set<Beam>();
+  if (stats) {
+    const groups = new Map<string, Beam[]>();
+    for (const b of all) {
+      const k = `${b.stage}|${stateKey(b.st, ahead, false)}`;
+      (groups.get(k) ?? groups.set(k, []).get(k)!).push(b);
+    }
+    for (const g of groups.values()) {
+      for (const pick of [(x: Beam) => x.st.trust, (x: Beam) => -x.st.trust, (x: Beam) => x.st.desire, (x: Beam) => -x.st.desire]) {
+        keep.add(g.reduce((m, x) => (pick(x) < pick(m) ? x : m)));
+      }
+    }
+  }
+  const rest = all.filter((b) => !keep.has(b)).sort((a, b) => (beamBetter(a, b) ? -1 : 1));
+  for (const b of rest) {
+    if (keep.size >= BEAM_CAP) break;
+    keep.add(b);
+  }
+  // The extremes alone can outnumber the cap; never let them grow without bound.
+  return [...keep].slice(0, BEAM_HARD_CAP);
+}
+
+/** With a save loaded in Tracker Mode the route follows the save: no node its
+ *  route rules out, and at every choice the save has passed, only the option
+ *  it picked. Past the save's point anything goes. */
+let saveAvoidCache: { save: NormalizedSave; set: Set<string> } | null = null;
+function saveAvoid(): Set<string> {
+  if (!saveState) return new Set();
+  if (saveAvoidCache?.save === saveState) return saveAvoidCache.set;
+  const visitedSrc = new Set(saveState.visited);
+  const picked = (n: GraphNode) => n.src.some((x) => visitedSrc.has(x)) || !!n.pk?.some((x) => visitedSrc.has(x));
+  const set = new Set(blockedSet);
+  for (const n of GRAPH.nodes) {
+    if (!n.ch || picked(n)) continue;
+    const siblings = (parents.get(n.id) ?? []).flatMap((p) => children.get(p) ?? []);
+    if (siblings.some((s) => s !== n.id && byId.get(s)!.ch && picked(byId.get(s)!))) set.add(n.id);
+  }
+  saveAvoidCache = { save: saveState, set };
+  return set;
+}
+function followsSave(): boolean {
+  return viewMode === "tracker" && !!saveState;
+}
+
+/** For an event header with a requirement: the first header below it that
+ *  every way on from it passes through, i.e. where the game carries on when
+ *  it skips that event. Null if there's no such point or it isn't gated. */
+const skipCache = new Map<string, string | null>();
+function skipTo(h: string): string | null {
+  if (skipCache.has(h)) return skipCache.get(h)!;
+  const node = byId.get(h)!;
+  let found: string | null = null;
+  if (node.ev && node.rc) {
+    const below = [...computeDescendants(h)].filter((id) => id !== h && byId.get(id)!.ev)
+      .sort((a, b) => byId.get(a)!.y - byId.get(b)!.y);
+    for (const c of below.slice(0, 40)) {
+      const cy = byId.get(c)!.y;
+      const seen = new Set([h, c]);
+      const stack = [h];
+      let around = false;
+      while (stack.length && !around) {
+        for (const k of children.get(stack.pop()!) ?? []) {
+          if (seen.has(k)) continue;
+          if (byId.get(k)!.y > cy) { around = true; break; }
+          seen.add(k);
+          stack.push(k);
+        }
+      }
+      if (!around) { found = c; break; }
+    }
+  }
+  skipCache.set(h, found);
+  return found;
+}
+function computeDescendants(id: string): Set<string> {
+  const seen = new Set([id]);
+  const stack = [id];
+  while (stack.length) for (const c of children.get(stack.pop()!) ?? []) if (!seen.has(c)) { seen.add(c); stack.push(c); }
+  return seen;
+}
+
+function traceRoute(target: string, waypoints: string[], mode: RouteTrace["mode"]): RouteTrace | null {
+  const stats = mode === "full", strict = mode !== "any";
+  // Earliest waypoint first; until it's reached, stay among its ancestors.
+  const wps = waypoints.slice().sort((a, b) => byId.get(a)!.y - byId.get(b)!.y);
+  const goals = [...wps, target];
+  const allowed = goals.map((g) => computeAncestorPath(g).nodes);
+  const area = allowed[allowed.length - 1];
+  const visitedSrc = new Set(saveState?.visited ?? []);
+  const avoid = viewMode === "tracker" && saveState ? saveAvoid() : new Set<string>();
+
+  const enter = (e: GraphEdge | null, id: string, st: RouteState): boolean | null => {
+    let unknown = false;
+    if (strict) {
+      const checks: TriState[] = [];
+      if (e) checks.push(evalGroups(e.rc, st, stats));
+      for (const x of e?.fx ?? []) {
+        const c = x.c ? evalGroups(x.c, st, stats) : true;
+        if (c === true) applyEffects(st, x.e);
+        else if (c === null) unknown = true;
+      }
+      checks.push(evalGroups(byId.get(id)!.rc, st, stats));
+      if (checks.includes(false)) return false;
+      if (checks.includes(null)) unknown = true;
+    }
+    applyEffects(st, byId.get(id)!.fx);
+    for (const ev of byId.get(id)!.ev ?? []) st.events.add(ev);
+    return unknown ? null : true;
+  };
+  const seenBonus = (id: string) => (byId.get(id)!.src.some((x) => visitedSrc.has(x)) ? 1 : 0);
+  // A leak hangs off the story as a dead end on the map, but the game plays
+  // it and goes on: going on past its node picks up what the leak sets (the
+  // mom2..mom5 flags), when its condition holds.
+  const sideLeaks = (u: string, st: RouteState): boolean => {
+    let unknown = false;
+    for (const e of outEdges.get(u) ?? []) {
+      if (!byId.get(e.t)!.lk) continue;
+      const probe = cloneRouteState(st);
+      const ok = enter(e, e.t, probe);
+      if (ok === false) continue;
+      if (ok === null) unknown = true;
+      else Object.assign(st, probe);
+    }
+    return unknown;
+  };
+
+  // Story order within the target's ancestors (Kahn).
+  const indeg = new Map<string, number>();
+  for (const id of area) indeg.set(id, (inEdges.get(id) ?? []).filter((e) => area.has(e.f)).length);
+  const roots = [...area].filter((id) => indeg.get(id) === 0);
+  const order: string[] = [];
+  for (const queue = roots.slice(); queue.length;) {
+    const u = queue.shift()!;
+    order.push(u);
+    for (const e of outEdges.get(u) ?? []) {
+      if (!area.has(e.t)) continue;
+      indeg.set(e.t, indeg.get(e.t)! - 1);
+      if (indeg.get(e.t) === 0) queue.push(e.t);
+    }
+  }
+  // What is still checked from each node on (towards the target).
+  const ahead = new Map<string, Set<string>>();
+  for (let i = order.length - 1; i >= 0; i--) {
+    const set = new Set<string>();
+    for (const e of outEdges.get(order[i]) ?? []) {
+      // Leaks off the way are played too (see sideLeaks): their checks count.
+      if (!area.has(e.t) && !byId.get(e.t)!.lk) continue;
+      for (const t of EDGE_TESTS.get(e.id)!) set.add(t);
+      for (const t of ahead.get(e.t) ?? []) set.add(t);
+    }
+    ahead.set(order[i], set);
+  }
+  const beams = new Map<string, Map<string, Beam>>();
+  for (const r of roots) {
+    const st = startState();
+    if (enter(null, r, st) === false) continue;
+    const b: Beam = { st, stage: r === goals[0] && wps.length ? 1 : 0, node: r, edge: null, prev: null, unsure: false, nUnsure: 0, len: 1, seen: seenBonus(r) };
+    beams.set(r, new Map([[`${b.stage}|${stateKey(st, ahead.get(r)!, stats)}`, b]]));
+  }
+  let best: Beam | null = null;
+  for (const u of order) {
+    const here = beams.get(u);
+    beams.delete(u);
+    if (!here) continue;
+    for (const b of pruneBeams(here, stats, ahead.get(u)!)) {
+      if (u === target && b.stage === wps.length) {
+        if (!best || beamBetter(b, best)) best = b;
+        continue;
+      }
+      const push = (v: string, edgeId: string, st: RouteState, ok: boolean | null) => {
+        const stage = b.stage < wps.length && v === goals[b.stage] ? b.stage + 1 : b.stage;
+        const nb: Beam = { st, stage, node: v, edge: edgeId, prev: b, unsure: ok === null, nUnsure: b.nUnsure + (ok === null ? 1 : 0), len: b.len + 1, seen: b.seen + seenBonus(v) };
+        const key = `${stage}|${stateKey(st, ahead.get(v)!, stats)}`;
+        const set = beams.get(v) ?? beams.set(v, new Map()).get(v)!;
+        const had = set.get(key);
+        if (!had || beamBetter(nb, had)) set.set(key, nb);
+      };
+      for (const e of outEdges.get(u) ?? []) {
+        const v = e.t;
+        if (!allowed[b.stage].has(v) || avoid.has(v)) continue;
+        const st = cloneRouteState(b.st);
+        const leakUnsure = strict && !byId.get(v)!.lk ? sideLeaks(u, st) : false;
+        const entered = enter(e, v, st);
+        if (entered === false) {
+          // The game skips an event whose requirement fails and goes on
+          // where its branches meet again; the map draws no line for that.
+          const r = strict ? skipTo(v) : null;
+          if (r && allowed[b.stage].has(r) && !avoid.has(r) && !(b.stage < wps.length && wps.includes(v))) {
+            const s2 = cloneRouteState(b.st);
+            if (sideLeaks(u, s2) === false && evalGroups(byId.get(v)!.rc, s2, stats) === false) {
+              const into = enter(null, r, s2);
+              if (into !== false) push(r, `skip:${v}`, s2, into);
+            }
+          }
+          continue;
+        }
+        push(v, e.id, st, leakUnsure ? null : entered);
+      }
+    }
+  }
+  if (!best) return null;
+  const chain: Beam[] = [];
+  for (let b: Beam | null = best; b; b = b.prev) chain.push(b);
+  chain.reverse();
+  const nodes = chain.map((b) => b.node);
+  const edges = chain.slice(1).map((b) => b.edge!);
+  const statsAt = new Map<string, RouteStep>();
+  for (let i = 0; i < chain.length; i++) {
+    const prev = i > 0 ? chain[i - 1].st : startState();
+    statsAt.set(chain[i].node, { trust: chain[i].st.trust, desire: chain[i].st.desire, dTrust: chain[i].st.trust - prev.trust, dDesire: chain[i].st.desire - prev.desire });
+  }
+  return {
+    target, nodes, edges, mode, stats: statsAt, end: best.st,
+    unchecked: new Set(chain.filter((b) => b.unsure && b.edge).map((b) => b.edge!)),
+  };
+}
+
+let routeTrace: RouteTrace | null = null;
+let routeWaypoints: string[] = [];
+/** Other ancestors of the target: faint, click one to route through it. */
+let altNodes: Set<string> | null = null;
+let altEdges: Set<string> | null = null;
+const UNCHECKED_COLOR = "#f0a33a";
+
+/** Every tracked condition first, then without Trust/Desire, then any way at all. */
+function findRoute(target: string, waypoints: string[]): RouteTrace | null {
+  return traceRoute(target, waypoints, "full") ?? traceRoute(target, waypoints, "flags") ?? traceRoute(target, waypoints, "any");
+}
+/** Found routes by target, waypoints and what the search depends on (mode, save). */
+const routeCache = new Map<string, RouteTrace | null>();
+let routePending: string | null = null;
+function applyRouteTrace(target: string): void {
+  const key = `${target}|${routeWaypoints.join(",")}|${viewMode}|${saveState ? blockedSet.size + ":" + saveState.visited.length : ""}`;
+  const anc = computeAncestorPath(target);
+  const show = (trace: RouteTrace | null) => {
+    routeTrace = trace;
+    pathNodes = trace ? new Set(trace.nodes) : anc.nodes;
+    pathEdges = trace ? new Set(trace.edges) : anc.edges;
+    altNodes = trace ? new Set([...anc.nodes].filter((id) => !pathNodes!.has(id))) : null;
+    altEdges = trace ? new Set([...anc.edges].filter((id) => !pathEdges!.has(id))) : null;
+  };
+  if (routeCache.has(key)) {
+    show(routeCache.get(key)!);
+    renderRouteInfo();
+    return;
+  }
+  // Late in the game a search can take a second: light up every way here at
+  // once, say so, and swap in the route when it's found.
+  show(null);
+  routePending = key;
+  renderRouteInfo();
+  setTimeout(() => {
+    if (routePending !== key) return;
+    routePending = null;
+    const trace = findRoute(target, routeWaypoints);
+    routeCache.set(key, trace);
+    if (selectedTarget !== target) return;
+    show(trace);
+    renderRouteInfo();
+    draw();
+  }, 30);
+}
+/** The node the route panel is about (also while its route is being found). */
+let selectedTarget: string | null = null;
+function dropRouteTrace(): void {
+  routeTrace = null;
+  routePending = null;
+  selectedTarget = null;
+  routeWaypoints = [];
+  altNodes = null;
+  altEdges = null;
+  renderRouteInfo();
+}
+function routeThrough(id: string): void {
+  if (!routeTrace) return;
+  const wpAnc = computeAncestorPath(id).nodes;
+  // Keep only earlier waypoints that still line up with the new one.
+  routeWaypoints = routeWaypoints.filter((w) => wpAnc.has(w) || computeAncestorPath(w).nodes.has(id));
+  routeWaypoints.push(id);
+  applyRouteTrace(routeTrace.target);
+  draw();
+}
+
+// ---------- Route panel ----------
+const routeInfo = document.createElement("div");
+routeInfo.id = "routeInfo";
+routeInfo.className = "panel";
+routeInfo.setAttribute("role", "region");
+getEl("app").appendChild(routeInfo);
+/** Choices the viewer tapped open in the panel while Tracker Mode masks them. */
+const routeRevealed = new Set<string>();
+function heartName(colour: string): string {
+  return HEART_CHARS.find(([v]) => v === `${colour}_heart`)?.[1] ?? colour;
+}
+
+function routeEl<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text = ""): HTMLElementTagNameMap[K] {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text) el.textContent = text;
+  return el;
+}
+function signed(n: number): string {
+  return n > 0 ? `+${n}` : String(n);
+}
+function renderRouteInfo(): void {
+  const r = routeTrace;
+  routeInfo.textContent = "";
+  if (!r && routePending) {
+    routeInfo.appendChild(routeEl("div", "muted", T("routeFinding", "Finding a route…")));
+    routeInfo.style.display = "block";
+    return;
+  }
+  if (!r && selectedTarget && followsSave()) {
+    // Searched and found nothing: the save's own choices don't lead here.
+    routeInfo.appendChild(routeEl("div", "ri-note", T("routeNotFromSave", "Your save's choices don't lead here.")));
+    routeInfo.style.display = "block";
+    return;
+  }
+  if (!r) { routeInfo.style.display = "none"; return; }
+  const head = routeEl("div", "ri-head");
+  head.append(routeEl("b", "", T("routeTitle", "Route here")), routeEl("span", "muted", T("routeSteps", "{n} steps", { n: r.nodes.length })));
+  const close = routeEl("button", "ri-close", "✕");
+  close.type = "button";
+  close.title = T("routeClose", "Close");
+  close.setAttribute("aria-label", close.title);
+  close.addEventListener("click", () => clearHighlight());
+  head.appendChild(close);
+  routeInfo.appendChild(head);
+  if (followsSave()) routeInfo.appendChild(routeEl("div", "muted", T("routeFollowsSave", "Follows your save's choices, then any way on from there.")));
+  if (r.mode === "flags") routeInfo.appendChild(routeEl("div", "ri-note", T("routeNoStats", "No route fits Mabel's Trust and Desire exactly: this one follows the flags and hearts.")));
+  if (r.mode === "any") routeInfo.appendChild(routeEl("div", "ri-note", T("routeAny", "No route fits every condition on the map: this is just one way here.")));
+
+  // Where the stats stand on arriving.
+  const last = r.stats.get(r.target);
+  if (last && r.mode !== "any") {
+    const parts = [`${T("trust", "Trust")} ${last.trust}`, `${T("desire", "Desire")} ${last.desire}`];
+    for (const [who, n] of r.end.hearts) if (n) parts.push(`${heartName(who)} ♥${n}`);
+    routeInfo.appendChild(routeEl("div", "ri-sec", `${T("routeHere", "On arrival")}: ${parts.join(" · ")}`));
+  }
+
+  // The choices to make, in order.
+  const picks = r.nodes.filter((id) => byId.get(id)!.ch);
+  if (picks.length) {
+    const sec = routeEl("div", "ri-sec", T("routeChoices", "Choices to make"));
+    const masked = viewMode === "tracker" && maskChoiceText && picks.some((id) => !visitedRevealSet.has(id) && !routeRevealed.has(id));
+    if (masked) {
+      const all = routeEl("button", "ri-reset", T("routeShowAll", "Show all"));
+      all.type = "button";
+      all.addEventListener("click", () => { for (const id of picks) routeRevealed.add(id); renderRouteInfo(); });
+      sec.append(" ", all);
+    }
+    routeInfo.appendChild(sec);
+    const ol = routeEl("ol", "ri-list");
+    for (const id of picks) {
+      const n = byId.get(id)!;
+      const li = routeEl("li", "");
+      const hidden = viewMode === "tracker" && maskChoiceText && !visitedRevealSet.has(id) && !routeRevealed.has(id);
+      const btn = routeEl("button", hidden ? "ri-step ri-hidden" : "ri-step", hidden ? T("routeHidden", "Hidden choice (tap to show)") : n.t.split("\n")[0]);
+      btn.type = "button";
+      btn.addEventListener("click", () => {
+        if (hidden) { routeRevealed.add(id); renderRouteInfo(); return; }
+        centerOn(n.x + n.w / 2, n.y + n.h / 2, Math.max(cam.scale, 0.85));
+      });
+      li.appendChild(btn);
+      const st = r.stats.get(id);
+      // The label already says "+Faith": show where that leaves the meter.
+      if (st && !hidden && r.mode !== "any" && (st.dTrust || st.dDesire)) {
+        const d: string[] = [];
+        if (st.dTrust) d.push(`${T("trust", "Trust")} ${st.trust}`);
+        if (st.dDesire) d.push(`${T("desire", "Desire")} ${st.desire}`);
+        li.appendChild(routeEl("span", "muted", ` → ${d.join(", ")}`));
+      }
+      if (r.unchecked.has(r.edges[r.nodes.indexOf(id) - 1])) li.classList.add("ri-warn");
+      ol.appendChild(li);
+    }
+    routeInfo.appendChild(ol);
+  }
+
+  // Events the route's state doesn't qualify for: the game skips them.
+  const skipped = r.edges.filter((id) => id.startsWith("skip:")).map((id) => byId.get(id.slice(5))!);
+  if (skipped.length) {
+    routeInfo.appendChild(routeEl("div", "ri-sec", T("routeSkipped", "Skipped, requirement not met:")));
+    const ul = routeEl("ul", "ri-list");
+    for (const n of skipped) {
+      const btn = routeEl("button", "ri-step", n.t.replace(/\s*\n\s*/g, " "));
+      btn.type = "button";
+      btn.addEventListener("click", () => centerOn(n.x + n.w / 2, n.y + n.h / 2, Math.max(cam.scale, 0.85)));
+      const li = routeEl("li", "");
+      li.appendChild(btn);
+      ul.appendChild(li);
+    }
+    routeInfo.appendChild(ul);
+  }
+
+  // Steps whose condition the map can't check.
+  if (r.unchecked.size && r.mode !== "any") {
+    routeInfo.appendChild(routeEl("div", "ri-sec ri-warn", T("routeUnchecked", "Not checked, the map doesn't track these (amber lines):")));
+    const ul = routeEl("ul", "ri-list ri-warn");
+    for (const eid of r.edges) {
+      if (!r.unchecked.has(eid)) continue;
+      const e = edgeIndex.get(eid)!;
+      const n = byId.get(e.t)!;
+      const text = e.l || n.note || n.t.split("\n").slice(1).join(" ") || n.t.split("\n")[0];
+      const btn = routeEl("button", "ri-step", text);
+      btn.type = "button";
+      btn.addEventListener("click", () => centerOn(n.x + n.w / 2, n.y + n.h / 2, Math.max(cam.scale, 0.85)));
+      const li = routeEl("li", "");
+      li.appendChild(btn);
+      ul.appendChild(li);
+    }
+    routeInfo.appendChild(ul);
+  }
+
+  const foot = routeEl("div", "muted ri-foot", T("routeHint", "Faint nodes are other ways here: click one to route through it."));
+  if (routeWaypoints.length) {
+    const reset = routeEl("button", "ri-reset", T("routeReset", "Reset route"));
+    reset.type = "button";
+    reset.addEventListener("click", () => { routeWaypoints = []; applyRouteTrace(r.target); draw(); });
+    foot.append(" ", reset);
+  }
+  routeInfo.appendChild(foot);
+  routeInfo.style.display = "block";
+}
+
 function selectNode(id: string, animate = true): void {
   const n = byId.get(id);
   if (!n) return;
-  const p = computeAncestorPath(id);
-  pathNodes = p.nodes;
-  pathEdges = p.edges;
+  routeWaypoints = [];
+  selectedTarget = id;
+  applyRouteTrace(id);
   filterSet = null;
   groupOnly = false;
   selectedGroup = null;
@@ -756,6 +1421,7 @@ function selectNode(id: string, animate = true): void {
 }
 
 function clearHighlight(): void {
+  dropRouteTrace();
   pathNodes = null;
   pathEdges = null;
   filterSet = null;
@@ -772,7 +1438,7 @@ function isNodeVisible(n: GraphNode): boolean {
   if (viewMode === "spoiler") return true;
   if (n.id === rootId || n.pic) return true;
   if (visitedRevealSet.has(n.id)) return true;
-  return !!(pathNodes && pathNodes.has(n.id));
+  return !!(pathNodes && pathNodes.has(n.id)) || !!(altNodes && altNodes.has(n.id));
 }
 function isEdgeVisible(e: GraphEdge): boolean {
   if (viewMode === "spoiler") return true;
@@ -907,14 +1573,16 @@ function draw(): void {
     if (Math.max(a.x, b.x, dtx) + 400 < vx0 || Math.min(a.x, b.x, dtx) - 400 > vx1) continue;
     if (Math.max(a.y + a.h, b.y + b.h) < vy0 || Math.min(a.y, b.y) > vy1) continue;
     const inSet = pathEdges && pathEdges.has(e.id);
-    const dim = active && !inSet;
+    const alt = !inSet && !!altEdges && altEdges.has(e.id);
+    const dim = active && !inSet && !alt;
     const onPath = inSet && !groupOnly;
-    const col = onPath ? THEME.accent : e.c || edgeColor.get(e.id) || THEME.edge;
+    const unchecked = onPath && !!routeTrace && routeTrace.unchecked.has(e.id);
+    const col = unchecked ? UNCHECKED_COLOR : onPath ? THEME.accent : e.c || edgeColor.get(e.id) || THEME.edge;
     ctx.strokeStyle = col;
-    ctx.globalAlpha = dim ? 0.1 : onPath ? 1 : e.tree ? 0.85 : 0.6;
+    ctx.globalAlpha = dim ? 0.1 : alt ? 0.3 : onPath ? 1 : e.tree ? 0.85 : 0.6;
     const zw = Math.min(1, cam.scale);
     ctx.lineWidth = (onPath ? 6.2 : e.tree ? 5 : 4.6) * zw;
-    ctx.setLineDash(e.tree ? [] : [7, 5]);
+    ctx.setLineDash(unchecked ? [12, 7] : e.tree ? [] : [7, 5]);
     const pts = edgeCurvePoints(e, a, b);
     ctx.beginPath();
     ctx.moveTo(pts[0], pts[1]);
@@ -936,11 +1604,12 @@ function draw(): void {
     const sw = n.w * cam.scale, sh = n.h * cam.scale;
     const isMatch = filterSet && filterSet.has(n.id);
     const inSet = pathNodes && pathNodes.has(n.id);
-    const dim = active && !isMatch && !inSet;
+    const alt = !inSet && !!altNodes && altNodes.has(n.id);
+    const dim = active && !isMatch && !inSet && !alt;
     const emphasize = (isMatch || inSet) && !groupOnly;
     const isBlocked = viewMode === "tracker" && !!saveState && blockedSet.has(n.id);
     const isObtained = viewMode === "tracker" && !!saveState && n.pic && obtainedSet.has(n.id);
-    ctx.globalAlpha = dim ? Number(getComputedStyle(document.documentElement).getPropertyValue("--dim")) : isBlocked ? 0.55 : 1;
+    ctx.globalAlpha = dim ? Number(getComputedStyle(document.documentElement).getPropertyValue("--dim")) : alt ? 0.38 : isBlocked ? 0.55 : 1;
     if (n.j) {
       // Junction: just a dot where the incoming lines meet.
       ctx.fillStyle = emphasize ? THEME.accent : THEME.edge;
@@ -996,6 +1665,21 @@ function draw(): void {
         ty += lh;
       }
       if (isBlocked) blockedLabelsToDraw.push({ sx: sx + sw / 2, sy: sy + sh + 4 * cam.scale });
+      ctx.textAlign = "left";
+    }
+    // Trust/Desire after each route step that moves them.
+    // Not under a choice Tracker Mode still hides: the change would give it away.
+    const step = inSet && showText && !maskedNode(n) && routeTrace && routeTrace.mode !== "any" ? routeTrace.stats.get(n.id) : undefined;
+    if (step && (step.dTrust || step.dDesire)) {
+      const parts: string[] = [];
+      if (step.dTrust) parts.push(`${T("trust", "Trust")} ${step.trust} (${signed(step.dTrust)})`);
+      if (step.dDesire) parts.push(`${T("desire", "Desire")} ${step.desire} (${signed(step.dDesire)})`);
+      ctx.globalAlpha = 1;
+      ctx.font = `600 ${Math.max(9, 11 * cam.scale)}px -apple-system,Segoe UI,sans-serif`;
+      ctx.fillStyle = THEME.accent;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillText(parts.join(" · "), sx + sw / 2, sy + sh + 4 * cam.scale);
       ctx.textAlign = "left";
     }
     ctx.globalAlpha = 1;
@@ -1302,6 +1986,7 @@ function edgeAt(clientX: number, clientY: number): GraphEdge | null {
 function selectEdge(e: GraphEdge, animate = true): void {
   const a = byId.get(e.f), b = byId.get(e.t);
   if (!a || !b) return;
+  dropRouteTrace();
   pathNodes = new Set([e.f, e.t]);
   pathEdges = new Set([e.id]);
   filterSet = null;
@@ -1325,6 +2010,7 @@ function groupAt(clientX: number, clientY: number): GraphGroup | null {
 }
 function selectGroup(g: GraphGroup, animate = true): void {
   const members = new Set(g.members ?? []);
+  dropRouteTrace();
   pathNodes = members;
   const es = new Set<string>();
   for (const e of GRAPH.edges) if (members.has(e.f) && members.has(e.t)) es.add(e.id);
@@ -1341,6 +2027,7 @@ function selectGroup(g: GraphGroup, animate = true): void {
 function selectGroupTracker(g: GraphGroup, animate = true): void {
   groupOnly = true;
   selectedGroup = g;
+  dropRouteTrace();
   pathNodes = null;
   pathEdges = null;
   filterSet = null;
@@ -1354,7 +2041,11 @@ function handleClick(e: MouseEvent): void {
   const pill = pillAt(e.clientX, e.clientY);
   if (pill) { selectEdge(pill); return; }
   const n = nodeAt(e.clientX, e.clientY);
-  if (n) { selectNode(n.id); return; }
+  if (n) {
+    if (altNodes && altNodes.has(n.id)) routeThrough(n.id);
+    else selectNode(n.id);
+    return;
+  }
   const edge = edgeAt(e.clientX, e.clientY);
   if (edge) { selectEdge(edge); return; }
   const g = groupAt(e.clientX, e.clientY);
@@ -1478,6 +2169,7 @@ function runSearch(qRaw: string): void {
   const q = qRaw.trim().toLowerCase();
   if (!q) {
     filterSet = null;
+    dropRouteTrace();
     pathNodes = null;
     pathEdges = null;
     groupOnly = false;
@@ -1498,6 +2190,7 @@ function runSearch(qRaw: string): void {
   }
   if (wantNew) matches.sort((a, b) => Number(!!b.isNew) - Number(!!a.isNew));
   filterSet = new Set(matches.map((n) => n.id));
+  dropRouteTrace();
   pathNodes = null;
   pathEdges = null;
   groupOnly = false;
@@ -1758,6 +2451,8 @@ function updateSaveStatus(): void {
 }
 
 function applySave(rawSave: NormalizedSave): void {
+  // Saves stored before the uid table existed still carry uid:// lines.
+  rawSave.visited = rawSave.visited.map(fixUidLine);
   saveState = rawSave;
   blockedSet = computeBlocked(rawSave);
   visitedRevealSet = computeVisited(rawSave, !strictPathOnly);
