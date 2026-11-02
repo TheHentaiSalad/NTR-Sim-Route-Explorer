@@ -343,6 +343,10 @@ let showGroups = false;
 let saveState = null;
 let blockedSet = new Set();
 let visitedRevealSet = new Set();
+/** Events the loaded save's path skips (requirement not met): from the node
+ *  before it, to where the story goes on, and the skipped header. Drawn as a
+ *  dashed jump so the path doesn't look broken. */
+let saveSkips = [];
 let obtainedSet = new Set();
 let hoveredNodeId = null;
 /** "uid://c8arno2jt1kpo:12" -> "week1/6day:12" (2day, 2night, 6day and 7day
@@ -554,23 +558,112 @@ function computeBlocked(rawSave) {
     }
     return blocked;
 }
+/** Did the save see this node? Pictures and lines by their own line; a
+ *  choice by its reply lines (the history holds what was shown, not tapped). */
+function seenBySave(n, visitedSrc) {
+    return n.src.some((x) => visitedSrc.has(x)) || (!!n.ch && !!n.pk?.some((x) => visitedSrc.has(x)));
+}
+/** Nodes a save provably didn't take: options next to the one it picked;
+ *  before its current point, nodes that set a flag it doesn't have (the
+ *  NTR/NTS and LUST/LOVE boxes); after it, ones its route rules out. (That
+ *  last check uses today's stats, so it can't judge the past: Desire was 0
+ *  once even if it's 15 now.) */
+function computeSaveExcluded(save, blocked) {
+    const visitedSrc = new Set(save.visited);
+    const out = new Set();
+    const past = new Set();
+    const stack = GRAPH.nodes.filter((n) => seenBySave(n, visitedSrc)).map((n) => n.id);
+    while (stack.length) {
+        const u = stack.pop();
+        if (past.has(u))
+            continue;
+        past.add(u);
+        stack.push(...(parents.get(u) ?? []));
+    }
+    for (const n of GRAPH.nodes) {
+        if (!n.ch || seenBySave(n, visitedSrc))
+            continue;
+        const options = [...new Set((parents.get(n.id) ?? []).flatMap((p) => children.get(p) ?? []))]
+            .map((id) => byId.get(id)).filter((m) => m.ch);
+        // Another option was picked; or this prompt is behind the save's point and
+        // none of its options were, though each would show in the history if it
+        // had been (they all have reply lines): the save never got this prompt,
+        // e.g. a chat the game skipped.
+        if (options.some((m) => m !== n && seenBySave(m, visitedSrc)))
+            out.add(n.id);
+        else if (past.has(n.id) && options.every((m) => m.pk?.length))
+            out.add(n.id);
+    }
+    const flags = new Set(save.flags);
+    for (const n of GRAPH.nodes) {
+        // Not event headers: their recorded effects can include flags the event
+        // only sets on some of its branches.
+        if (past.has(n.id) && !n.ev && (n.fx ?? []).some(([v, , f]) => v === "flag" && !flags.has(String(f))))
+            out.add(n.id);
+    }
+    for (const id of blocked)
+        if (!past.has(id))
+            out.add(id);
+    return out;
+}
+/** The save's own path: nodes reachable from the start and leading on to
+ *  something it saw, both without passing a node it didn't take. */
 function computeVisited(rawSave, includeSiblings) {
     const revealed = new Set();
     if (!rawSave)
         return revealed;
     const visitedSrc = new Set(rawSave.visited);
-    const pathNodeIds = new Set();
+    const excluded = computeSaveExcluded(rawSave, blockedSet);
+    const walk = (starts, next) => {
+        const seen = new Set();
+        const stack = starts.filter((id) => !excluded.has(id));
+        while (stack.length) {
+            const u = stack.pop();
+            if (seen.has(u))
+                continue;
+            seen.add(u);
+            for (const v of next.get(u) ?? [])
+                if (!excluded.has(v))
+                    stack.push(v);
+        }
+        return seen;
+    };
+    // The game skips an event whose requirement fails (see skipTo): walk round it too.
+    const fwdNext = new Map(children), backNext = new Map(parents);
     for (const n of GRAPH.nodes) {
-        if (!n.src || !n.src.length)
+        const to = n.ev && n.rc ? skipTo(n.id) : null;
+        if (!to)
             continue;
-        if (n.src.some((s) => visitedSrc.has(s))) {
-            const p = computeAncestorPath(n.id);
-            for (const id of p.nodes)
-                pathNodeIds.add(id);
+        for (const p of parents.get(n.id) ?? []) {
+            fwdNext.set(p, [...(fwdNext.get(p) ?? []), to]);
+            backNext.set(to, [...(backNext.get(to) ?? []), p]);
         }
     }
-    for (const id of pathNodeIds) {
+    const back = walk(GRAPH.nodes.filter((n) => seenBySave(n, visitedSrc)).map((n) => n.id), backNext);
+    const fwd = walk(GRAPH.nodes.filter((n) => !(inEdges.get(n.id) ?? []).length).map((n) => n.id), fwdNext);
+    const onPath = (id) => back.has(id) && fwd.has(id);
+    saveSkips = [];
+    for (const n of GRAPH.nodes) {
+        const to = n.ev && n.rc ? skipTo(n.id) : null;
+        if (!to || onPath(n.id) || !onPath(to))
+            continue;
+        for (const p of parents.get(n.id) ?? [])
+            if (onPath(p))
+                saveSkips.push({ f: p, t: to, h: n.id });
+    }
+    for (const id of back) {
+        if (!fwd.has(id))
+            continue;
         revealed.add(id);
+        // The other options of a prompt you answered: you saw them in the game.
+        // Just the options, not where they lead.
+        if (byId.get(id).ch && seenBySave(byId.get(id), visitedSrc)) {
+            for (const p of parents.get(id) ?? []) {
+                for (const sib of children.get(p) ?? [])
+                    if (byId.get(sib).ch)
+                        revealed.add(sib);
+            }
+        }
         if (!includeSiblings)
             continue;
         for (const p of parents.get(id) ?? []) {
@@ -587,6 +680,9 @@ function computeObtained(rawSave) {
     const visitedSrc = new Set(rawSave.visited);
     for (const n of GRAPH.nodes) {
         if (n.src && n.src.length && n.src.some((s) => visitedSrc.has(s)))
+            obtained.add(n.id);
+        // A choice shows up in the history by its reply lines, not its own line.
+        else if (n.ch && n.pk?.some((s) => visitedSrc.has(s)))
             obtained.add(n.id);
     }
     return obtained;
@@ -948,16 +1044,7 @@ function saveAvoid() {
         return new Set();
     if (saveAvoidCache?.save === saveState)
         return saveAvoidCache.set;
-    const visitedSrc = new Set(saveState.visited);
-    const picked = (n) => n.src.some((x) => visitedSrc.has(x)) || !!n.pk?.some((x) => visitedSrc.has(x));
-    const set = new Set(blockedSet);
-    for (const n of GRAPH.nodes) {
-        if (!n.ch || picked(n))
-            continue;
-        const siblings = (parents.get(n.id) ?? []).flatMap((p) => children.get(p) ?? []);
-        if (siblings.some((s) => s !== n.id && byId.get(s).ch && picked(byId.get(s))))
-            set.add(n.id);
-    }
+    const set = computeSaveExcluded(saveState, blockedSet);
     saveAvoidCache = { save: saveState, set };
     return set;
 }
@@ -1417,12 +1504,25 @@ function clearHighlight() {
     getEl("clearBtn").style.display = "none";
     draw();
 }
+/** Explanation notes drawn beside a node (the route-flag rules beside Day 18),
+ *  keyed to that node: they show whenever it does. */
+const SIDE_NOTES = new Map();
+for (const n of GRAPH.nodes) {
+    if (n.pic || n.src.length || (outEdges.get(n.id) ?? []).length)
+        continue;
+    const side = (inEdges.get(n.id) ?? []).find((e) => e.par);
+    if (side)
+        SIDE_NOTES.set(n.id, side.f);
+}
 function isNodeVisible(n) {
     if (viewMode === "spoiler")
         return true;
     if (n.id === rootId || n.pic)
         return true;
     if (visitedRevealSet.has(n.id))
+        return true;
+    const anchor = SIDE_NOTES.get(n.id);
+    if (anchor && isNodeVisible(byId.get(anchor)))
         return true;
     return !!(pathNodes && pathNodes.has(n.id)) || !!(altNodes && altNodes.has(n.id));
 }
@@ -1435,8 +1535,14 @@ function isEdgeVisible(e) {
 function maskedNode(n) {
     if (viewMode !== "tracker" || !maskChoiceText)
         return false;
+    // Side notes (the route-flag rules beside Day 18) are explanation, not story.
+    if (SIDE_NOTES.has(n.id))
+        return false;
     if (n.id === rootId || n.pic)
         return false;
+    // Options you were offered but didn't pick: shown, but read on hover.
+    if (n.ch && saveState && !obtainedSet.has(n.id))
+        return hoveredNodeId !== n.id;
     if (visitedRevealSet.has(n.id))
         return false;
     return hoveredNodeId !== n.id;
@@ -1604,6 +1710,41 @@ function draw() {
         }
         ctx.globalAlpha = 1;
     }
+    // Skipped events: a dashed jump past them, labelled with what was skipped.
+    const skips = viewMode === "tracker" && saveState ? saveSkips.map((x) => ({ ...x, route: false })) : [];
+    if (routeTrace) {
+        routeTrace.edges.forEach((id, i) => {
+            if (id.startsWith("skip:"))
+                skips.push({ f: routeTrace.nodes[i], t: routeTrace.nodes[i + 1], h: id.slice(5), route: true });
+        });
+    }
+    for (const k of skips) {
+        const a = byId.get(k.f), b = byId.get(k.t);
+        if (!isNodeVisible(a) || !isNodeVisible(b))
+            continue;
+        const [x0, y0] = worldToScreen(a.x + a.w / 2, a.y + a.h);
+        const [x3, y3] = worldToScreen(b.x + b.w / 2, b.y);
+        const my = (y0 + y3) / 2;
+        ctx.strokeStyle = k.route ? THEME.accent : THEME.edge;
+        ctx.globalAlpha = k.route ? 1 : 0.8;
+        ctx.lineWidth = (k.route ? 6.2 : 4.6) * Math.min(1, cam.scale);
+        ctx.setLineDash([10, 7]);
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.bezierCurveTo(x0, my, x3, my, x3, y3);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+        if (cam.scale > 0.22) {
+            const h = byId.get(k.h);
+            const text = T("skippedEvent", "Skipped: {x}", { x: h.t.replace(/\s*\n\s*/g, " ") });
+            ctx.font = `600 ${Math.max(9, 12 * Math.min(cam.scale, 1))}px -apple-system,Segoe UI,sans-serif`;
+            ctx.fillStyle = THEME.text;
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            ctx.fillText(text, (x0 + x3) / 2 + 12, my);
+        }
+    }
     const showText = cam.scale > 0.16;
     const blockedLabelsToDraw = [];
     for (const n of GRAPH.nodes) {
@@ -1619,7 +1760,8 @@ function draw() {
         const dim = active && !isMatch && !inSet && !alt;
         const emphasize = (isMatch || inSet) && !groupOnly;
         const isBlocked = viewMode === "tracker" && !!saveState && blockedSet.has(n.id);
-        const isObtained = viewMode === "tracker" && !!saveState && n.pic && obtainedSet.has(n.id);
+        // Pictures you've unlocked and choices you've made.
+        const isObtained = viewMode === "tracker" && !!saveState && (n.pic || !!n.ch) && obtainedSet.has(n.id);
         ctx.globalAlpha = dim ? Number(getComputedStyle(document.documentElement).getPropertyValue("--dim")) : alt ? 0.38 : isBlocked ? 0.55 : 1;
         if (n.j) {
             // Junction: just a dot where the incoming lines meet.
@@ -2130,6 +2272,9 @@ function handleHover(e) {
         else if (viewMode === "tracker" && saveState && n.pic && obtainedSet.has(n.id)) {
             html += `<div class="obtained">${escapeHtml(T("alreadyUnlocked", "Already unlocked"))}</div>`;
         }
+        else if (viewMode === "tracker" && saveState && n.ch && obtainedSet.has(n.id)) {
+            html += `<div class="obtained">${escapeHtml(T("youPicked", "You picked this"))}</div>`;
+        }
         const day = nearestDayLabel(n.y);
         if (day)
             html += `<div class="muted">${escapeHtml(day)}</div>`;
@@ -2362,6 +2507,7 @@ function buildLegend() {
     if (viewMode === "tracker") {
         html += `<h4>${L("lgTracker", "Tracker Mode (with a save loaded)")}</h4>`;
         html += `<div class="legend-row"><span class="swatch" style="background:none;border-color:#3fc98a;border-width:2px"></span>${L("lgUnlocked", "already unlocked")}</div>`;
+        html += `<div class="legend-row"><span class="swatch" style="background:${THEME.nodeDefault};border-color:#3fc98a;border-width:2px"></span>${L("lgChosen", "choice you made")}</div>`;
         html += `<div class="legend-row"><span class="swatch" style="background:${THEME.edgeDim};border-color:${THEME.edge}"></span>${L("lgDisabled", "disabled due to route chosen")}</div>`;
     }
     legendEl.innerHTML = html;
